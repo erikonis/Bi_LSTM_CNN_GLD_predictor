@@ -1,5 +1,4 @@
 import math
-from re import sub
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 import numpy as np
@@ -9,11 +8,13 @@ import json, os
 import dtale
 
 class MarketDataset(Dataset):
-    def __init__(self, data_df:pd.DataFrame, seq_len:int=30) -> None:
+    def __init__(self, data_df:pd.DataFrame, raw_OHLCV, seq_len:int=30) -> None:
         """
         :param data_df: DataFrame containing the merged and processed data
         :param seq_len: Length of the historical window for market data
         """
+        self.raw_OHLCV = raw_OHLCV
+        self.raw_prices = raw_OHLCV[['Open', 'High', 'Low', 'Close', 'Volume']].values.astype(np.float32)
         self.dataframe = data_df
         
         self.seq_len = seq_len
@@ -40,32 +41,54 @@ class MarketDataset(Dataset):
         # Actual index in the dataframe
         curr_idx = self.valid_indices[idx]
         
-        # 1. Market Data: The 30-day "Window" (Shape: 30, feature_dim)
-        mkt_data = self.market_values[curr_idx - self.seq_len : curr_idx]
+        # 1. Market Data: The 30-day "Window" (Shape: 30, )
+        mkt_data = self.market_values[curr_idx - self.seq_len+1 : curr_idx+1]
         
-        # 2. Sentiment Data: Just today's mood (Shape: 4)
+        # 2. Sentiment Data: Just today's mood (Shape: 2)
         # Note: We use the sentiment from the yesterday to predict Today.
-        sent_data = self.sentiment_values[curr_idx-1]
+        sent_data = self.sentiment_values[curr_idx]
         
         # 3. Target: today's OHLC (Shape: 4)
-        target = self.targets[curr_idx-1]
+        target = self.targets[curr_idx]
+        real_price = self.raw_prices[curr_idx]
         
-        return torch.tensor(mkt_data), torch.tensor(sent_data), torch.tensor(target)
+        return torch.tensor(mkt_data), torch.tensor(sent_data), torch.tensor(target), real_price
 
     def get_dataframe(self) -> pd.DataFrame:
         """Returns the whole dataframe."""
         return self.dataframe
 
-    def show_dataframe_interactive(self, subprocess:bool=False) -> None:
+    def show_dataframe_interactive(self, subprocess:bool=False, which:int=0) -> None:
         """
         A method useful to conveniently explore the dataset contained within. Usable for debugging, performing analysis and finding outliers.
         It creates a webpage on the local host that can be clicked and be opened in the browser.
         
         :param subprocess: if set to True, the tab is shown asynchronically. Beware that if the code terminates, the window immediately closes too. False prevents that by stopping the control flow.
         :type subprocess: bool
+        :param which: if 1, shows the processed dataframe; if 2, shows the raw OHLCV dataframe. 0 shows both.
         """
-        display = dtale.show(self.dataframe, subprocess=subprocess)
-        display.open_browser()
+        match which:
+            case 0:
+                display = dtale.show(self.dataframe, subprocess=True)
+                display.open_browser()
+                display = dtale.show(self.raw_OHLCV, subprocess=True)
+                display.open_browser()
+            case 1:
+                display = dtale.show(self.dataframe, subprocess=True)
+                display.open_browser()
+            case 2:
+                display = dtale.show(self.raw_OHLCV, subprocess=True)
+                display.open_browser()
+            case _:
+                raise ValueError(f"Unexpected argument '{which}' passed. Use 0, 1 or 2 only.")
+
+        if not subprocess:
+            try:
+                input("D-Tale sessions running — press Enter to exit...\n")
+            except KeyboardInterrupt:
+                pass
+
+        return display
 
     def save(self, folder_path="saved_dataset") -> None:
         """Serialize/save the MarketDataset object in the specified folder. It is created if it does not exist."""
@@ -84,20 +107,26 @@ class MarketDataset(Dataset):
         torch.save(payload, os.path.join(folder_path, "tensors.pt"))
         
         # Save DataFrame as Parquet
-        self.dataframe.to_parquet(os.path.join(folder_path, "metadata.parquet"))
+        self.dataframe.to_parquet(os.path.join(folder_path, "dataframe.parquet"))
         print(f"Dataset successfully saved to {folder_path}")
+        
+        self.raw_OHLCV.to_parquet(os.path.join(folder_path, "raw_OHLCV.parquet"))
+        print(f"Raw OHLCV dataset successfully saved to {folder_path}")
+
 
     @classmethod
     def load(cls, folder_path="saved_dataset"):
         """Deserialize/load: Reconstructs the object from parquet and pickle files found in the specified folder."""
         # 1. Load the DataFrame
-        df = pd.read_parquet(os.path.join(folder_path, "metadata.parquet"))
+        df = pd.read_parquet(os.path.join(folder_path, "dataframe.parquet"))
+
+        raw = pd.read_parquet(os.path.join(folder_path, "raw_OHLCV.parquet"))
         
         # 2. Load the Tensors
         payload = torch.load(os.path.join(folder_path, "tensors.pt"), weights_only=True)
         
         # Create instance
-        instance = cls(df, seq_len=payload['seq_len'])
+        instance = cls(df, raw, seq_len=payload['seq_len'])
         
         # Override the values with the loaded tensors to ensure exact precision
         instance.market_values = payload['mkt'].numpy()
@@ -117,14 +146,14 @@ class MarketDataset(Dataset):
         :return: list of indices corresponding to the specified years
         """
         lst = []
-        for idx in self.valid_indices:
-            if self.years[idx] in years_list:
+        for idx in range(len(self.valid_indices)):
+            if self.years[self.valid_indices[idx]] in years_list:
                 lst.append(idx)
         return lst
 
     def get_loaders(self, batch_size:int=64, training_setting : str = "expanding_window"):
         """
-        A generator that outputs a tuple of loaders `(train_set, val_set, test_set)` for each training cycle.
+        A generator that outputs a tuple of loaders `(train_set, val_set, test_set, real_price_set)` for each training cycle.
         For instance, in case of `training_setting == "expanding_window"`, each `next()` call yields new train, val, test split
         with train dataset incremented by 1 year: \n
             1. train 2015-2020, val 2021, test 2022
@@ -135,7 +164,7 @@ class MarketDataset(Dataset):
 
         :param batch_size: the size of each batch for the training. Applies for train and validation sets.
         :type: int
-        :param training_setting: the splitting option. Default is "expanding_window". Putting wrong values raises KeyError. No other is implemented for now.
+        :param training_setting: the splitting option. Default is "expanding_window". Putting wrong values raises ValueError. No other is implemented for now.
         :type: str
         :returns: (train_set, validation_set, test_set) upon next() call
         """
@@ -151,29 +180,29 @@ class MarketDataset(Dataset):
                 for test_year in test_years:
                     print(f"\n--- Starting Fold: Test Year {test_year} ---")
                     
-                    # Training is everything from start_year up to (but not including) test_year
-                    train_years = list(range(start_year, test_year))
-                    
                     # Validation is usually the year before the test year, or a subset of training
-                    val_year = [test_year - 1] 
+                    val_year = test_year - 1 
+
+                    # Training is everything from start_year up to (but not including) val_year
+                    train_years = list(range(start_year, val_year))
                     
                     # 1. Get Indices
                     train_idx = self.get_indices_by_year(train_years)
-                    val_idx = self.get_indices_by_year(val_year)
+                    val_idx = self.get_indices_by_year([val_year])
                     test_idx = self.get_indices_by_year([test_year])
                     
                     # 2. Create Subsets and Loaders, make a generator that yields next loaders.
                     yield (
-                        DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True), #train
-                        DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False),  #validate
-                        DataLoader(Subset(dataset, test_idx), batch_size=1, shuffle=False),          #test
+                        DataLoader(Subset(self, train_idx), batch_size=batch_size, shuffle=True, ), #train
+                        DataLoader(Subset(self, val_idx), batch_size=batch_size, shuffle=False),  #validate
+                        DataLoader(Subset(self, test_idx), batch_size=1, shuffle=False),          #test
                         test_year #metadata - which year we are in
                         )
                     
             # Placeholder for other datasplit options if needed to implement (rolling window, fixed, etc.)
             
             case _ :
-                raise KeyError(f"Incorrect argument passed. There is no option '{training_setting}'!")
+                raise ValueError(f"Incorrect argument passed. There is no option '{training_setting}'!")
         
 def load_data(csv_path:str, json_path:str) -> pd.DataFrame:
     """
@@ -293,6 +322,7 @@ def normalize_dataframe(df:pd.DataFrame, window:int=90) -> pd.DataFrame:
 
     # Create a copy to avoid modifying the original dataframe
     pdf = df.copy().sort_index()
+    df.sort_index()
 
     # 1. PRICE & VOLUME: Close-Anchored Log Returns
     # We use shift(1) to anchor today's OHLC to yesterday's Close
@@ -353,13 +383,12 @@ def normalize_dataframe(df:pd.DataFrame, window:int=90) -> pd.DataFrame:
         'SMA_20_Rel', 'SMA_50_Rel', 'BB_Low_Rel', 'BB_High_Rel', 'ATR_Pct',
         'Target_Open', 'Target_High', 'Target_Low', 'Target_Close'
     ]
-    
+    pdf = pdf.dropna()
+
     final_df = pdf[cols_to_keep]
+    ohlcv = pdf[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
-    # Drop the first 'window' rows (the burn-in period) to remove NaNs
-    final_df = final_df.dropna()
-
-    return final_df
+    return final_df, ohlcv
 
 def form_dataset(csv_path:str, json_path:str, seq_len:int=30):
     """
@@ -377,20 +406,29 @@ def form_dataset(csv_path:str, json_path:str, seq_len:int=30):
     df = apply_technicals(df)
     
     # Normalize and prepare features
-    df = normalize_dataframe(df)
+    df, raw_ohlcv = normalize_dataframe(df)
     
     # Create Dataset
-    dataset = MarketDataset(df, seq_len=seq_len)
+    dataset = MarketDataset(df, raw_ohlcv, seq_len=seq_len)
     
     return dataset
 
 if __name__ == "__main__":
 
-    dataset = MarketDataset.load()
+    # dataset = form_dataset("hist_data/stock_data/GLD.csv", "News/finBERT_scores.json")
+    # dataset.save()
 
-    for i, k, l, c in dataset.get_loaders():
-        print("--- New Fold ---")
-        print(f"{i}")
-        print(f"{k}")
-        print(f"{l}")
-        print(f"{c}")
+    dataset = MarketDataset.load()
+    
+    # for tr, v, tes, y in dataset.get_loaders():
+    #     for mkt_data, sent_data, targets, real_price in tes:
+    #         #print("-market_data:", np.array2string(mkt_data.numpy()[0][-1], precision=4, separator=', '))
+            
+    #         print(f"-sentiment_data: {sent_data.numpy().tolist()}\n"
+    #               f"-targets: {targets.numpy().tolist()}\n"
+    #               f"-real_price: {real_price.numpy().tolist()}")
+            
+    # print(f"Max: {max(dataset.valid_indices)}")
+    # print(f"Min: {min(dataset.valid_indices)}")
+
+    dataset.show_dataframe_interactive()    
