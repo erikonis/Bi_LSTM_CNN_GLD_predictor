@@ -6,14 +6,11 @@ import pandas as pd
 import pandas_ta as ta # For technical indicators
 import json, os
 import dtale
-from overrides import overrides
 
-class MarketDataset(Dataset):
+class MarketDataset2(Dataset):
     def __init__(self, data_df:pd.DataFrame, raw_OHLCV, market_cols = ['Log_Ret_Open', 'Log_Ret_High', 'Log_Ret_Low', 'Log_Ret_Close', 'Log_Ret_Vol', 'RSI_Z', 'MACD_Z', 'MACD_Sig_Z',
         'SMA_20_Rel', 'SMA_50_Rel', 'BB_Low_Rel', 'BB_High_Rel', 'ATR_Pct'], sent_cols = ['Sentiment', 'News_Vol_Z'], seq_len:int=30) -> None:
         """
-        MArket Dataset class for 1st CNN-LSTM architecture version, where 
-        
         :param data_df: DataFrame containing the merged and processed data
         :param seq_len: Length of the historical window for market data
         """
@@ -26,7 +23,6 @@ class MarketDataset(Dataset):
         self.seq_len = seq_len
 
         self.years = data_df['Year'].values.astype(np.int32)
-
         
         # Targets are the NEXT day's OHLC (Open, High, Low, Close)
         self.targets = data_df[['Target_Open', 'Target_High', 'Target_Low', 'Target_Close']].values.astype(np.float32)
@@ -37,7 +33,7 @@ class MarketDataset(Dataset):
     def __len__(self) -> int:
         return len(self.valid_indices)
 
-    def __getitem__(self, idx:int):
+    def __getitem__(self, idx: int):
         # TODO: optimize
 
         curr_idx = self.valid_indices[idx]
@@ -47,41 +43,15 @@ class MarketDataset(Dataset):
 
         mkt_data = market_values[curr_idx - self.seq_len + 1 : curr_idx + 1]
         
-        # 2. Sentiment Data: Just today's mood (Shape: 2)
-        # Note: We use the sentiment from the yesterday to predict Today.
-
+        # 2. Sentiment Data: NOW a 30-day window as well!
+        # This allows the CNN to see sentiment trends
         sentiment_values = self.dataframe[self.sent_cols].values.astype(np.float32)
-        sent_data = sentiment_values[curr_idx]
+        sent_data = sentiment_values[curr_idx - self.seq_len + 1 : curr_idx + 1]
         
-        # 3. Target: today's OHLC (Shape: 4)
         target = self.targets[curr_idx]
         real_price = self.raw_prices[curr_idx]
         
         return torch.tensor(mkt_data), torch.tensor(sent_data), torch.tensor(target), real_price
-    
-    @classmethod
-    def form_dataset(cls, csv_path:str, json_path:str, seq_len:int=30):
-        """
-        Loads, processes, and forms a MarketDataset ready for training.
-        
-        :param csv_path: path to the market CSV file
-        :param json_path: path to the sentiment JSON file
-        :param seq_len: length of historical window for market data
-        :return: MarketDataset instance
-        """
-        # Load and merge data
-        df = load_data(csv_path, json_path)
-        
-        # Apply technical indicators
-        df = apply_technicals(df)
-        
-        # Normalize and prepare features
-        df, raw_ohlcv = normalize_dataframe(df)
-        
-        # Create Dataset
-        dataset = cls(df, raw_ohlcv, seq_len=seq_len)
-        
-        return dataset
 
     def get_dataframe(self) -> pd.DataFrame:
         """Returns the whole dataframe."""
@@ -229,60 +199,10 @@ class MarketDataset(Dataset):
                         )
                     
             # Placeholder for other datasplit options if needed to implement (rolling window, fixed, etc.)
-            case "sliding_window":
-                ref_start_year = start_year
-                test_years = range(start_year + math.floor(num_years*0.6), end_year + 1)
-                
-                for test_year in test_years:
-                    print(f"\n--- Starting Fold: Test Year {test_year} ---")
-                    
-                    # Validation is usually the year before the test year, or a subset of training
-                    val_year = test_year - 1 
-
-                    # Training is everything from start_year up to (but not including) val_year
-                    train_years = list(range(ref_start_year, val_year))
-                    ref_start_year += 1
-
-                    # 1. Get Indices
-                    train_idx = self.get_indices_by_year(train_years)
-                    val_idx = self.get_indices_by_year([val_year]) #REVERT TO val_year
-                    test_idx = self.get_indices_by_year([test_year])
-                    
-                    # 2. Create Subsets and Loaders, make a generator that yields next loaders.
-                    yield (
-                        DataLoader(Subset(self, train_idx), batch_size=batch_size, shuffle=True, ), #train
-                        DataLoader(Subset(self, val_idx), batch_size=batch_size, shuffle=False),  #validate
-                        DataLoader(Subset(self, test_idx), batch_size=1, shuffle=False),          #test
-                        test_year #metadata - which year we are in
-                        )
+            
             case _ :
                 raise ValueError(f"Incorrect argument passed. There is no option '{training_setting}'!")
-        
-class MarketDataset2(MarketDataset):
-    """A subclass of MarketDataset for 2nd CNN-LSTM architecture.
-       (Includes sentiment features in the CNN data)
-    """
-
-    @overrides
-    def __getitem__(self, idx: int):
-        # TODO: optimize
-
-        curr_idx = self.valid_indices[idx]
-        
-        # 1. Market Data: 30-day window
-        market_values = self.dataframe[self.market_cols].values.astype(np.float32)
-
-        mkt_data = market_values[curr_idx - self.seq_len + 1 : curr_idx + 1]
-        
-        # 2. Sentiment Data: NOW a 30-day window as well!
-        # This allows the CNN to see sentiment trends
-        sentiment_values = self.dataframe[self.sent_cols].values.astype(np.float32)
-        sent_data = sentiment_values[curr_idx - self.seq_len + 1 : curr_idx + 1]
-        
-        target = self.targets[curr_idx]
-        real_price = self.raw_prices[curr_idx]
-        
-        return torch.tensor(mkt_data), torch.tensor(sent_data), torch.tensor(target), real_price
+  
 
 def load_data(csv_path:str, json_path:str) -> pd.DataFrame:
     """
@@ -470,10 +390,33 @@ def normalize_dataframe(df:pd.DataFrame, window:int=90) -> pd.DataFrame:
 
     return final_df, ohlcv
 
+def form_dataset(csv_path:str, json_path:str, seq_len:int=30):
+    """
+    Loads, processes, and forms a MarketDataset ready for training.
+    
+    :param csv_path: path to the market CSV file
+    :param json_path: path to the sentiment JSON file
+    :param seq_len: length of historical window for market data
+    :return: MarketDataset instance
+    """
+    # Load and merge data
+    df = load_data(csv_path, json_path)
+    
+    # Apply technical indicators
+    df = apply_technicals(df)
+    
+    # Normalize and prepare features
+    df, raw_ohlcv = normalize_dataframe(df)
+    
+    # Create Dataset
+    dataset = MarketDataset2(df, raw_ohlcv, seq_len=seq_len)
+    
+    return dataset
+
 if __name__ == "__main__":
 
-    dataset = MarketDataset2.form_dataset("hist_data/stock_data/GLD.csv", "News/finBERT_scores.json")
-    dataset.save()
+    #dataset = form_dataset("hist_data/stock_data/GLD.csv", "News/finBERT_scores.json")
+    #dataset.load()
 
     dataset = MarketDataset2.load()
     
@@ -488,4 +431,4 @@ if __name__ == "__main__":
     # print(f"Max: {max(dataset.valid_indices)}")
     # print(f"Min: {min(dataset.valid_indices)}")
 
-    dataset.show_dataframe_interactive()    
+    dataset.show_dataframe_interactive()
