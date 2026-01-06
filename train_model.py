@@ -16,7 +16,19 @@ from abc import ABC, abstractmethod
 
 import logging 
 
+overwrite = False
+
 output_folder = "output"
+if overwrite:
+        os.makedirs(output_folder, exist_ok=True)
+else:
+    i = 1
+    base_folder = output_folder
+    while os.path.exists(output_folder):
+        output_folder = f"{base_folder}_{i}"
+        i += 1
+    os.makedirs(output_folder, exist_ok=True)
+
 
 class LogOHLCLoss(nn.Module):
     def __init__(self, penalty_weight=0.5):
@@ -24,26 +36,28 @@ class LogOHLCLoss(nn.Module):
         self.mse = nn.HuberLoss() 
         self.penalty_weight = penalty_weight
 
-    def forward(self, pred, target):
-        # pred/target shape: (batch, 4) -> [r_open, r_high, r_low, r_close]
-        
+    def forward(self, pred, target):        
         # 1. Base Regression Loss (Standard Huber)
         base_loss = self.mse(pred, target)
         
-        # 2. Log-Space Constraints
-        # High must be >= Open, Low, and Close
-        # If r_open - r_high > 0, it means Open is higher than High (Violation!)
-        h_o_penalty = torch.mean(F.relu(pred[:, 0] - pred[:, 1]))
-        h_l_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 1])) # Low > High
-        h_c_penalty = torch.mean(F.relu(pred[:, 3] - pred[:, 1]))
-        
-        # Low must be <= Open, High, and Close
-        # If r_low - r_open > 0, it means Low is higher than Open (Violation!)
-        l_o_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 0]))
-        l_c_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 3]))
-        
-        total_penalty = h_o_penalty + h_l_penalty + h_c_penalty + l_o_penalty + l_c_penalty
-        
+        dim = pred.ndim
+
+        if pred.ndim == 4:
+            # 2. Log-Space Constraints
+            # High must be >= Open, Low, and Close
+            # If r_open - r_high > 0, it means Open is higher than High (Violation!)
+            h_o_penalty = torch.mean(F.relu(pred[:, 0] - pred[:, 1]))
+            h_l_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 1])) # Low > High
+            h_c_penalty = torch.mean(F.relu(pred[:, 3] - pred[:, 1]))
+            
+            # Low must be <= Open, High, and Close
+            # If r_low - r_open > 0, it means Low is higher than Open (Violation!)
+            l_o_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 0]))
+            l_c_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 3]))
+            total_penalty = h_o_penalty + h_l_penalty + h_c_penalty + l_o_penalty + l_c_penalty
+        else:
+            total_penalty = 0
+
         return base_loss + (self.penalty_weight * total_penalty)
 
 class Attention(nn.Module):
@@ -114,6 +128,7 @@ class PredictorSkeleton(ABC, nn.Module):
         return checkpoint.get('fold', 0)
 
 class GoldPredictor(PredictorSkeleton):
+    # Deprecicated
     def __init__(self, mkt_feat_dim, sent_feat_dim, hidden_dim=64):
         super(GoldPredictor, self).__init__()
         self.cnn3 = nn.Conv1d(mkt_feat_dim, int(np.ceil(hidden_dim/2)), kernel_size=3, padding=1)
@@ -130,14 +145,14 @@ class GoldPredictor(PredictorSkeleton):
         nn.Linear(sent_feat_dim, sent_inner),
         nn.BatchNorm1d(sent_inner), # Keeps sentiment features from being "washed out"
         nn.ReLU(),
-        nn.Dropout(0.2))
+        nn.Dropout(0.1))
         
         # --- Fusion Head ---
         # (hidden_dim * 2 from Bi-LSTM) + 16 from Sentiment
         self.fc_fusion = nn.Sequential(
             nn.Linear((hidden_dim * 2) + sent_inner, 64),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1),
             nn.Linear(64, 4) # Predicts [Open, High, Low, Close]
         )
 
@@ -167,14 +182,14 @@ class GoldPredictor(PredictorSkeleton):
         return output
 
 class GoldPredictor2(PredictorSkeleton):
-    def __init__(self, mkt_feat_dim, sent_feat_dim, hidden_dim=64):
+    def __init__(self, mkt_feat_dim, sent_feat_dim, hidden_dim=64, target_dim = 4):
         super(GoldPredictor2, self).__init__()
 
         total_feat_dim = mkt_feat_dim + sent_feat_dim
 
         # Update your CNNs to accept the combined dimension
-        self.cnn3 = nn.Conv1d(total_feat_dim, int(np.ceil(hidden_dim/2)), kernel_size=3, padding=1)
-        self.cnn5 = nn.Conv1d(total_feat_dim, int(np.floor(hidden_dim/2)), kernel_size=5, padding=2)
+        #self.cnn3 = nn.Conv1d(total_feat_dim, int(np.ceil(hidden_dim/2)), kernel_size=3, padding=1)
+        self.cnn5 = nn.Conv1d(total_feat_dim, hidden_dim, kernel_size=5, padding=2)
         
         # --- Market Branch (CNN + Bi-LSTM) ---
         #self.cnn = nn.Conv1d(in_channels=mkt_feat_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
@@ -182,12 +197,12 @@ class GoldPredictor2(PredictorSkeleton):
         self.attention = Attention(hidden_dim * 2) # *2 for Bidirectional
         
         # --- Fusion Head ---
-        # (hidden_dim * 2 from Bi-LSTM) + 16 from Sentiment
+        # (hidden_dim * 2 from Bi-LSTM)
         self.fc_fusion = nn.Sequential(
-            nn.Linear((hidden_dim * 2), 64),
+            nn.Linear((hidden_dim * 2), target_dim*8),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(64, 4) # Predicts [Open, High, Low, Close]
+            nn.Linear(target_dim*8, target_dim) # Predicts [Open, High, Low, Close]
         )
 
     def forward(self, mkt_seq, sent_vec):
@@ -195,14 +210,15 @@ class GoldPredictor2(PredictorSkeleton):
         # CNN expects (batch, channels, seq_len)
         combined = torch.cat((mkt_seq, sent_vec), dim=2)
         feat_vec = combined.transpose(1, 2)
-        mkt_cnn3 = F.relu(self.cnn3(feat_vec))
+        #mkt_cnn3 = F.relu(self.cnn3(feat_vec))
         mkt_cnn5 = F.relu(self.cnn5(feat_vec))
         
         # Concatenate along the channel dimension
-        mkt_cnn = torch.cat((mkt_cnn3, mkt_cnn5), dim=1)
+        # mkt_cnn = torch.cat((mkt_cnn3, mkt_cnn5), dim=1)
         
         # Back to (batch, seq_len, hidden_dim) for LSTM
-        mkt_cnn = mkt_cnn.transpose(1, 2)
+        #mkt_cnn = mkt_cnn.transpose(1, 2)
+        mkt_cnn = mkt_cnn5.transpose(1, 2)
         lstm_out, _ = self.lstm(mkt_cnn)
         
         # Attention pooling
@@ -212,7 +228,7 @@ class GoldPredictor2(PredictorSkeleton):
         output = self.fc_fusion(mkt_context)
         return output
 
-def train_model(model, device, train_loader, val_loader, market_cols, sent_cols, epochs=50, lr=0.001, logger=None, debug=False, early_stop = False):
+def train_model(model, device, train_loader, val_loader, market_cols, sent_cols, epochs=50, lr=0.0005, logger=None, debug=False, early_stop = False):
     """
     Proposed hyperparameters in the paper 'Implementation of Long Short-Term Memory for Gold Prices Forecasting'
     are: epoch = 100, LR = 0.01 with Adam optimizer, and expanding window.
@@ -223,7 +239,8 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
     
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     # Allow for adaptive learning rate:
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+
     if early_stop:
         stopper = EarlyStopping(patience=10)
     criterion = LogOHLCLoss() # Robust to financial outliers
@@ -262,9 +279,10 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
 
             # Fetching model weights:
 
-            mkt_w3 = model.cnn3.weight.abs().mean(dim=(0, 2)) 
+            #mkt_w3 = model.cnn3.weight.abs().mean(dim=(0, 2)) 
             mkt_w5 = model.cnn5.weight.abs().mean(dim=(0, 2))
-            mkt_weights = (mkt_w3 + mkt_w5) / 2 # Average of both CNN paths
+            #mkt_weights = (mkt_w3 + mkt_w5) / 2 # Average of both CNN paths
+            mkt_weights = mkt_w5
             all_current_weights = mkt_weights.cpu().numpy()
 
             for i, name in enumerate(feature_names):
@@ -293,7 +311,7 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
         
-        scheduler.step()
+        scheduler.step(avg_val_loss)
         
         
         current_lr = scheduler.get_last_lr()[0]
@@ -338,14 +356,14 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
         
     return history, optimizer, weight_history
 
-def feature_engineering(dataset, train_loader, val_loader, mkt_cols, sent_cols, device, logger, threshold=0):
+def feature_engineering(train_loader, val_loader, mkt_cols, sent_cols, device, logger, hidden_dim=64, target_dim=4, threshold=0):
     # --- PHASE 1: Signal Discovery (Quick Run) ---
     logger.info("PHASE 1: Identifying feature signals...")
     
     # Initialize a temporary model to test importance
     mkt_dim = len(mkt_cols) # Initial count
     sent_dim = len(sent_cols)
-    temp_model = GoldPredictor2(mkt_dim, sent_dim).to(device)
+    temp_model = GoldPredictor2(mkt_dim, sent_dim, hidden_dim=hidden_dim, target_dim = target_dim).to(device)
 
     train_model(temp_model, device, train_loader, val_loader,  mkt_cols, sent_cols, epochs=50, lr=0.001, logger=logger, early_stop=False)
     
@@ -369,11 +387,7 @@ def feature_engineering(dataset, train_loader, val_loader, mkt_cols, sent_cols, 
     
     # --- PHASE 2: Optimized Training ---
     logger.info("PHASE 2: Starting optimized training with Early Stopping...")
-    final_model = GoldPredictor2(len(filtered_mkt), len(filtered_sent)).to(device)
-    
-
-    dataset.market_cols = filtered_mkt
-    dataset.sent_cols = filtered_sent
+    final_model = GoldPredictor2(len(filtered_mkt), len(filtered_sent), hidden_dim=hidden_dim, target_dim=target_dim).to(device)
     
     return final_model, filtered_mkt, filtered_sent
 
@@ -424,7 +438,7 @@ def evaluate_test_set(model, test_loader, logger=None, scaler_target=None, debug
     results = backtest_with_costs(all_preds, all_actuals, threshold=0.002, fee=0.0003)
 
     # --- Metric 4: Threshold Sensitivity Analysis ---
-    find_best_threshold(all_preds, all_actuals)
+    find_best_threshold(all_preds, all_actuals, logger)
 
     if not logger:
         print(f"--- Final Test Results ---")
@@ -443,7 +457,7 @@ def evaluate_test_set(model, test_loader, logger=None, scaler_target=None, debug
         print(f"Buy & Hold Final Value: ${results['buy_and_hold'][-1]:.2f}")
         print(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
     
-        if results['final_value'] > (results['buy_and_hold'][-1]/1000 - 1):
+        if results['final_value'] > (results['buy_and_hold'][-1]):
             print("STRATEGY OUTPERFORMED MARKET")
         else:
             print("MARKET OUTPERFORMED STRATEGY")
@@ -534,64 +548,93 @@ def setup_logger(filename : str = f"{output_folder}/model_train.log"):
 
 def calculate_trading_metrics(preds, targets, epsilon_pct=0.002, last_close_prices=None):
     """Calculate trading-related metrics given predictions and targets.
+
+    The function assumes Gold price normalization as logarithmic return with the division in the logarithmic function from the last day close price. All multiplied by 100.
+    I.e. `normalized value = log(curr_price/last_close_price)*100`, where curr_price can be any of Open (O), High(H), Low (L) or Close (C).
+
+    In order to calculate the metrics in regards of last_close_prices in USD, function must receive H, L, C changes of the price.
+
+    The assumptions must be met:
+    This function assumes to be passed predictions of [O,H,L,C]. The order must be held like this.
+    Given such output of dimension 4, everything holds. Else:
+        - If dimension is 3 and `last_close_prices` is given, we assume to receive [H,L,C].
+        - If dimension is 3 and `last_close_prices == None`, we assume to receive [*,*,C].
+        - If dimension is less than 3, the function will assume [*,C] ([C] accordingly) and will calculate as if `last_close_prices == None`
     
     :param preds: np.array of shape (num_samples, 4) - predicted log-returns [O,H,L,C]
     :param targets: np.array of shape (num_samples, 4) - actual log-returns [O,H,L,C]
     :param epsilon_pct: float - threshold for epsilon accuracy (e.g., 0.002 for 0.2%)
     :param last_close_prices: np.array of shape (num_samples, 4) - last known real prices [O,H,L,C] before prediction
-    :return: dict with metrics: range_coverage, epsilon_accuracy, directional_accuracy, mae, mape
+    :return: dict with metrics: range_coverage, epsilon_accuracy, directional_accuracy, mae, mape, max_pred_move, avg_pred_move. Note that that range coverage might return a `np.nan` if the target does not contain [H, L, C].
     """
+
     # Adapting epsilon to normalization
     epsilon_pct = epsilon_pct*100
 
+    # Checking dimensions
+    num_cols = preds.shape[1] if len(preds.shape) > 1 else 1
+
+    # Enforcing assumptions:
+    if num_cols == 4:
+        h_idx, l_idx, c_idx = 1, 2, 3
+    elif num_cols == 3 and last_close_prices is not None:
+        h_idx, l_idx, c_idx = 0, 1, 2
+    else:
+        # For dimensions < 3, we force last_close_prices to None logic for Range Coverage
+        h_idx, l_idx, c_idx = None, None, -1
+        last_close_prices = None
+
     #Directional Accuracy 
-    actual_dir = np.sign(targets[:, 3]) 
-    pred_dir = np.sign(preds[:, 3])
+    actual_dir = np.sign(targets[:, c_idx])
+    pred_dir = np.sign(preds[:, c_idx])
     dir_acc = (actual_dir == pred_dir).astype(float).mean()
 
     # Log-space Volatility (Magnitude)
     # This tells us the largest move the model dared to predict
-    max_pred_move = np.max(np.abs(preds[:, 3]))
-    avg_pred_move = np.mean(np.abs(preds[:, 3]))
+    max_pred_move = np.max(np.abs(preds[:, c_idx]))
+    avg_pred_move = np.mean(np.abs(preds[:, c_idx]))
 
     # Epsilon Accuracy
     # With log returns, the difference |pred - target| IS essentially the % error.
     # Because ln(A) - ln(B) = ln(A/B) ≈ % change.
-    log_error = np.abs(preds[:, 3] - targets[:, 3])
+    log_error = np.abs(preds[:, c_idx] - targets[:, c_idx])
     epsilon_hit = log_error <= epsilon_pct
     epsilon_acc = epsilon_hit.astype(float).mean()
 
     # Log space
     mae = np.mean(np.abs(preds - targets))
-    
-    if last_close_prices is not None:
-        last_close = last_close_prices[:, 3] 
+    if num_cols > 2:
+        if last_close_prices is not None:
+            last_close = last_close_prices[:, 3] 
 
-        # Convert predicted log-returns back to USD
-        pred_high_usd  = last_close * np.exp(preds[:, 1]/100)  # High
-        pred_low_usd   = last_close * np.exp(preds[:, 2]/100)  # Low
-        pred_close_usd = last_close * np.exp(preds[:, 3]/100)  # Close
+            # Convert predicted log-returns back to USD
+            pred_high_usd  = last_close * np.exp(preds[:, h_idx]/100)  # High
+            pred_low_usd   = last_close * np.exp(preds[:, l_idx]/100)  # Low
+            pred_close_usd = last_close * np.exp(preds[:, c_idx]/100)  # Close
 
-        # Convert target log-returns back to USD
-        actual_close_usd = last_close * np.exp(targets[:, 3] /100)  # Close
+            # Convert target log-returns back to USD
+            actual_close_usd = last_close * np.exp(targets[:, c_idx] /100)  # Close
 
-        # MAPE (Price-based)
-        mape = np.mean(np.abs((actual_close_usd - pred_close_usd) / actual_close_usd)) * 100
+            # MAPE (Price-based)
+            mape = np.mean(np.abs((actual_close_usd - pred_close_usd) / actual_close_usd)) * 100
 
-        # Range Coverage (Price-based)
-        # Is the actual close price between our predicted High/Low?
-        covered = (actual_close_usd <= pred_high_usd) & (actual_close_usd >= pred_low_usd)
-        range_coverage_acc = covered.astype(float).mean()
-    
+            # Range Coverage (Price-based)
+            # Is the actual close price between our predicted High/Low?
+            covered = (actual_close_usd <= pred_high_usd) & (actual_close_usd >= pred_low_usd)
+            range_coverage_acc = covered.astype(float).mean()
+        
+        else:
+            # Fallback: Log-relative MAPE (less intuitive but stable)
+            # We treat the log-error as the percentage itself
+            mape = np.mean(np.abs(preds - targets)) * 100 
+
+            # Range Coverage
+            # Is the actual close 'return' within the predicted High/Low 'return' boundaries?
+            covered = (targets[:, c_idx] <= preds[:, h_idx]) & (targets[:, c_idx] >= preds[:, l_idx])
+            range_coverage_acc = covered.astype(float).mean()
     else:
-        # Fallback: Log-relative MAPE (less intuitive but stable)
-        # We treat the log-error as the percentage itself
-        mape = np.mean(np.abs(preds - targets)) * 100 
-
-        # Range Coverage
-        # Is the actual close 'return' within the predicted High/Low 'return' boundaries?
-        covered = (targets[:, 3] <= preds[:, 1]) & (targets[:, 3] >= preds[:, 2])
-        range_coverage_acc = covered.astype(float).mean()
+        mape = mape = np.mean(np.abs(preds - targets)) * 100 
+        range_coverage_acc = np.nan
 
     return {
         "range_coverage": range_coverage_acc,
@@ -603,14 +646,16 @@ def calculate_trading_metrics(preds, targets, epsilon_pct=0.002, last_close_pric
         "avg_pred_move": avg_pred_move
     }
 
-def backtest_with_costs(preds, targets, initial_capital=1000.0, threshold=0.001, fee=0.0005):
+def backtest_with_costs(preds, targets, initial_capital=1000.0, threshold=0.01, fee=0.0005):
     """
     Simulates trading with compounding returns and transaction fees.
     """
-    # 1. Generate Signals (Column 3 is 'Close')
+    c_id = -1
+
+    # 1. Generate Signals (Column -1 is 'Close')
     signals = np.zeros(len(preds))
-    signals[preds[:, 3] > threshold] = 1
-    signals[preds[:, 3] < -threshold] = -1
+    signals[preds[:, c_id] > threshold] = 1
+    signals[preds[:, c_id] < -threshold] = -1
     
     equity = [initial_capital]
     current_position = 0 # 0=Cash, 1=Long, -1=Short
@@ -629,13 +674,13 @@ def backtest_with_costs(preds, targets, initial_capital=1000.0, threshold=0.001,
         # 3. Calculate Market Movement for the day
         # Exp(actual_return) gives the price multiplier
         # If signal is 0 (Cash), multiplier is Exp(0) = 1 (No change)
-        daily_multiplier = np.exp(current_position * targets[i, 3]/100) 
+        daily_multiplier = np.exp(current_position * targets[i, c_id]/100) 
         
         equity.append(current_equity * daily_multiplier)
     
     # Convert to array and remove the seed value for analysis
     equity_curve = np.array(equity[1:])
-    buy_and_hold = initial_capital * np.exp(np.cumsum(targets[:, 3]) /100)
+    buy_and_hold = initial_capital * np.exp(np.cumsum(targets[:, c_id]) /100)
     
     # 4. Calculate Risk Metrics
     # Percentage daily returns of the strategy
@@ -653,15 +698,21 @@ def backtest_with_costs(preds, targets, initial_capital=1000.0, threshold=0.001,
         "final_value": equity_curve[-1]
     }
 
-def find_best_threshold(preds, targets):
+def find_best_threshold(preds, targets, logger=None):
     print("\n--- Threshold Sensitivity Analysis ---")
     print(f"{'Threshold':<12} | {'Trades':<8} | {'Final Value':<12} | {'Sharpe'}")
     print("-" * 50)
     
-    # Test thresholds from 0.05% to 0.5%
-    for t in [0.0005, 0.001, 0.0015, 0.002, 0.003, 0.005]:
-        res = backtest_with_costs(preds, targets, threshold=t, fee=0.0003)
-        print(f"{t*100:>9.2f}% | {res['num_trades']:>8} | ${res['final_value']:>10.2f} | {res['sharpe_ratio']:>6.2f}")
+    if not logger:
+        # Test thresholds from 0.05% to 0.5%
+        for t in [0.0005, 0.001, 0.0015, 0.002, 0.003, 0.005]:
+            res = backtest_with_costs(preds, targets, threshold=t, fee=0.0003)
+            print(f"{t*100:>9.2f}% | {res['num_trades']:>8} | ${res['final_value']:>10.2f} | {res['sharpe_ratio']:>6.2f}")
+    else:
+        # Test thresholds from 0.05% to 0.5%
+        for t in [0.0005, 0.001, 0.0015, 0.002, 0.003, 0.005]:
+            res = backtest_with_costs(preds, targets, threshold=t, fee=0.0003)
+            logger.info(f"{t*100:>9.2f}% | {res['num_trades']:>8} | ${res['final_value']:>10.2f} | {res['sharpe_ratio']:>6.2f}")
 
 def save_predictions_csv(preds, targets, filename=f"{output_folder}/gold_predictions.csv"):
     df = pd.DataFrame({
@@ -681,6 +732,8 @@ def plot_model_results(preds, targets, backtest_results, filename=f"{output_fold
     fig, axes = plt.subplots(2, 2, figsize=(18, 12))
     axes = axes.flatten()
     
+    c_id = -1
+
     # --- 1. Equity Curve ---
     ax1 = axes[0]
     ax1.plot(backtest_results['equity_curve'], label='Strategy', color='gold', linewidth=2)
@@ -707,9 +760,9 @@ def plot_model_results(preds, targets, backtest_results, filename=f"{output_fold
 
     # --- 3. Prediction vs Actual (Magnitude) ---
     ax3 = axes[2]
-    ax3.scatter(targets[:, 3]/100, preds[:, 3]/100, alpha=0.5, color='#1f77b4', s=15)
+    ax3.scatter(targets[:, c_id]/100, preds[:, c_id]/100, alpha=0.5, color='#1f77b4', s=15)
     # Identity line (where predictions = reality)
-    all_data = np.concatenate([targets[:, 3]/100, preds[:, 3]/100])
+    all_data = np.concatenate([targets[:, c_id]/100, preds[:, c_id]/100])
     low, high = all_data.min(), all_data.max()
     ax3.plot([low, high], [low, high], 'r--', alpha=0.8)
     ax3.set_title("Prediction vs. Reality Magnitude", fontsize=14, fontweight='bold')
@@ -719,7 +772,7 @@ def plot_model_results(preds, targets, backtest_results, filename=f"{output_fold
 
     # --- 4. Residuals (Bias Check) ---
     ax4 = axes[3]
-    errors = (targets[:, 3] - preds[:, 3]) / 100
+    errors = (targets[:, c_id] - preds[:, c_id]) / 100
     ax4.hist(errors, bins=60, color='seagreen', alpha=0.7, edgecolor='white')
     ax4.axvline(0, color='black', linestyle='-', linewidth=1)
     ax4.set_title("Error Distribution (Zero-Bias Check)", fontsize=14, fontweight='bold')
@@ -756,7 +809,7 @@ def plot_maw_progression(weight_history, fold_num, filename=f"{output_folder}/ma
 def plot_feature_weights(model, feature_names, filename=f"{output_folder}/feature_weights.png"):
     # model.cnn3 is the first layer. Shape: (out_channels, in_channels, kernel_size)
     
-    weights = model.cnn3.weight.data.cpu().abs().mean(dim=(0, 2)).numpy()
+    weights = model.cnn5.weight.data.cpu().abs().mean(dim=(0, 2)).numpy()
     
     plt.figure(figsize=(10, 6))
     pd.Series(weights, index=feature_names).sort_values().plot(kind='barh', color='teal')
@@ -779,7 +832,8 @@ def plot_attention_heatmap(model, val_loader, filename=f"{output_folder}/attenti
         combined_seq = torch.cat((mkt_data, sent_data), dim=2)
 
         combined_seq = combined_seq.transpose(1, 2)
-        mkt_cnn = torch.cat((F.relu(model.cnn3(combined_seq)), F.relu(model.cnn5(combined_seq))), dim=1)
+        #mkt_cnn = torch.cat((F.relu(model.cnn3(combined_seq)), F.relu(model.cnn5(combined_seq))), dim=1)
+        mkt_cnn = F.relu(model.cnn5(combined_seq))
         mkt_cnn = mkt_cnn.transpose(1, 2)
         lstm_out, _ = model.lstm(mkt_cnn)
         _, weights = model.attention(lstm_out) # weights shape: (batch, seq_len, 1)
@@ -799,6 +853,8 @@ def plot_feature_time_heatmap(model, val_loader, feature_names, filename=f"{outp
     model.eval()
     device = next(model.parameters()).device
     
+    c_id = -1
+
     # 1. Get a batch of data
     with torch.backends.cudnn.flags(enabled=False):
         mkt_data, sent_data, _, _ = next(iter(val_loader))
@@ -806,7 +862,7 @@ def plot_feature_time_heatmap(model, val_loader, feature_names, filename=f"{outp
         sent_data = sent_data.to(device).requires_grad_(True)
         
         output = model(mkt_data, sent_data)
-        loss = output[:, 3].mean()
+        loss = output[:, c_id].mean()
         model.zero_grad()
         loss.backward()
 
@@ -834,7 +890,8 @@ def plot_feature_time_heatmap(model, val_loader, feature_names, filename=f"{outp
 def calculate_permutation_importance(model, val_loader, mkt_cols, sent_cols, fold, filename=f"{output_folder}/permutation_importance.png"):
     device = next(model.parameters()).device
     model.eval()
-    
+    c_id = -1
+
     # 1. Calculate Base Score across the whole validation set
     base_mae = 0
     all_m, all_s, all_t = [], [], []
@@ -850,7 +907,7 @@ def calculate_permutation_importance(model, val_loader, mkt_cols, sent_cols, fol
             
     with torch.no_grad():
         base_out = model(m_orig, s_orig)
-        base_mae = torch.abs(base_out[:, 3] - t_orig[:, 3]).mean().item()
+        base_mae = torch.abs(base_out[:, c_id] - t_orig[:, c_id]).mean().item()
 
     importances = {}
     feature_names = mkt_cols + sent_cols
@@ -868,7 +925,7 @@ def calculate_permutation_importance(model, val_loader, mkt_cols, sent_cols, fol
         
         with torch.no_grad():
             perm_out = model(m_perm, s_perm)
-            perm_mae = torch.abs(perm_out[:, 3] - t_orig[:, 3]).mean().item()
+            perm_mae = torch.abs(perm_out[:, c_id] - t_orig[:, c_id]).mean().item()
         
         # Calculate as % change (Ratio is more stable)
         importances[name] = (perm_mae - base_mae) / (base_mae + 1e-9)
@@ -919,10 +976,11 @@ def plot_interpretability_report(model, val_loader, mkt_cols, sent_cols, fold, f
         feat_vec = combined_seq.transpose(1, 2)
         
         # 3. Pass through Parallel CNNs
-        m_cnn3 = F.relu(model.cnn3(feat_vec))
+        #m_cnn3 = F.relu(model.cnn3(feat_vec))
         m_cnn5 = F.relu(model.cnn5(feat_vec))
-        m_cnn = torch.cat((m_cnn3, m_cnn5), dim=1) # Concatenate filters
-        
+        #m_cnn = torch.cat((m_cnn3, m_cnn5), dim=1) # Concatenate filters
+        m_cnn = m_cnn5
+
         # 4. LSTM + Attention
         m_cnn = m_cnn.transpose(1, 2)
         lstm_out, _ = model.lstm(m_cnn)
@@ -967,30 +1025,51 @@ def main():
     automatic_feature_engineering = False
     early_stop = True
 
+    # ['Target_Open', 'Target_High', 'Target_Low', 'Target_Close']
+    targets = ['Target_Close']
     not_considered_feat = [] #['SMA_20_Rel', 'ATR_Pct', 'MACD_Sig_Z', 'SMA_50_Rel']
-    mkt_cols = [f for f in dataset.market_cols if f not in not_considered_feat]
-    sent_cols = [f for f in dataset.sent_cols if f not in not_considered_feat]
+    mkt_cols = [f for f in dataset._market_cols if f not in not_considered_feat]
+    sent_cols = [f for f in dataset._sent_cols if f not in not_considered_feat]
 
-    dataset.market_cols = mkt_cols
-    dataset.sent_cols = sent_cols
+    dataset.set_active_cols(new_market_cols=mkt_cols, new_sent_cols=sent_cols, new_target_cols=targets)
 
     mkt_feat_dim = len(mkt_cols) # 13 features
     sent_feat_dim = len(sent_cols) # 2 features
-   
-    hidden_dim = 128
+
+    target_dim = len(targets)
+    hidden_dim = 32
     batch_size = 64
     epochs = 100
     learning_rate = 0.0005
     feature_threshold = 0
     output_folder = "output"
-    # data_split = "expanding_window" 
-    data_split = "sliding_window"
+    data_split = "expanding_window" 
+    #data_split = "sliding_window"
+    overwrite = False
 
     feature_names = mkt_cols + sent_cols
-
-    os.makedirs(output_folder, exist_ok=True)
+    #-----------------------------------------
 
     logger = setup_logger()
+
+    logger.info("Hyperparameters:")
+    logger.info(f"  - Automatic Feature Engineering: {automatic_feature_engineering}")
+    logger.info(f"  - Early Stopping: {early_stop}")
+    logger.info(f"Targets: {targets}")
+    logger.info(f"  - Market Features: {mkt_cols}")
+    logger.info(f"  - Sentiment Features: {sent_cols}")
+    logger.info(f"  - Hidden Dim: {hidden_dim}")
+    logger.info(f"  - Batch Size: {batch_size}")
+    logger.info(f"  - Epochs: {epochs}")
+    logger.info(f"  - Learning Rate: {learning_rate}")
+    logger.info(f"  - Feature Threshold: {feature_threshold}")
+    logger.info(f"  - Output Folder: {output_folder}")
+    logger.info(f"  - Data Split: {data_split}")
+    logger.info(f"  - Architecture 2: CNN + LSTM + Attention")
+    logger.info(f"  - Overwrite: {overwrite}")
+    logger.info("-" * 50)
+    logger.info(f"Additional information:")
+    logger.info(f"  - cnn5 only")
     
     # Initialize Device and Model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -999,10 +1078,11 @@ def main():
         for train, val, test, test_year in dataset.get_loaders(training_setting=data_split, batch_size=batch_size):
             last_train = train
             last_val = val
-        model, mkt_cols, sent_cols = feature_engineering(dataset, last_train, last_val, mkt_cols, sent_cols, device, logger, threshold=feature_threshold)
+        model, mkt_cols, sent_cols = feature_engineering(last_train, last_val, mkt_cols, sent_cols, device, logger, hidden_dim=hidden_dim, target_dim=target_dim, threshold=feature_threshold)
+        dataset.set_active_cols(mkt_cols, sent_cols)
         feature_names = mkt_cols + sent_cols
     else:
-        model = GoldPredictor2(mkt_feat_dim, sent_feat_dim, hidden_dim)
+        model = GoldPredictor2(mkt_feat_dim, sent_feat_dim, hidden_dim, target_dim)
 
     # Weights collection
     weights = {name: [] for name in feature_names}
@@ -1013,16 +1093,18 @@ def main():
 
         fold_num += 1
 
-        logger.info(f"Starting Fold {fold_num} | Test Year: {test_year}")
+        logger.info(f"\n\n ==============> Starting Fold {fold_num} | Test Year: {test_year}")
         
         # Train Model
-        history, optimizer, fold_weights = train_model(model, device, train_loader, val_loader, market_cols=mkt_cols, sent_cols=sent_cols, epochs=epochs, lr=learning_rate, logger=logger, debug=False, early_stop=early_stop)
+        history, optimizer, fold_weights = train_model(model, device, train_loader, val_loader, market_cols=mkt_cols, sent_cols=sent_cols, epochs=epochs, lr=learning_rate, logger=logger, early_stop=early_stop)
         
         for name in feature_names:
             weights[name].extend(fold_weights[name])
 
+
+        #                                        TODO
         # Evaluate on Test Set
-        all_preds, all_actuals, performance = evaluate_test_set(model, test_loader,  logger=logger, debug=False)
+        all_preds, all_actuals, performance = evaluate_test_set(model, test_loader,  logger=logger)
         
         logger.info(f"Completed Fold {fold_num}\n")
 
