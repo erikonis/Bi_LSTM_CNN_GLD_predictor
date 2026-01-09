@@ -21,19 +21,22 @@ import pandas_ta as ta # For technical indicators
 import json, os
 import dtale
 from overrides import overrides
-from Constants import ColNames 
+from Constants import ColNames
+from datetime import datetime
 
 # Payload keys used for saving/loading the dataset payload. Centralized
 # to avoid hard-to-find string mismatches when editing save/load.
 PAY_TARGET_DATA = 'target_data'
 PAY_MARKET_DATA = 'market_data'
 PAY_SENTIMENT_DATA = 'sentiment_data'
+PAY_RAW_DATA = 'raw_data'
 PAY_INDICES = 'indices'
 PAY_YEARS = 'years'
 PAY_MARKET_COLS = 'market_cols'
 PAY_SENT_COLS = 'sent_cols'
 PAY_TARGET_COLS = 'target_cols'
-PAY_TARGET_SOURCE_COLS = 'target_source_cols'
+CLOSE_COL = 'close_cols'
+RAW_COLS = 'raw_cols'
 PAY_TARGET_NEW_NAMES = 'target_new_names'
 PAY_ORIGINAL_COLS_M = 'original_cols_m'
 PAY_ORIGINAL_COLS_S = 'original_cols_s'
@@ -42,50 +45,88 @@ PAY_TECHNICAL_COLS = 'technical_cols'
 PAY_NORMALIZED_COLS = 'normalized_cols'
 PAY_OHLC_MULTIPLIER = 'ohlc_multiplier'
 PAY_SEQ_LEN = 'seq_len'
+PAY_EARLIEST_DATE = 'earliest_date'
+PAY_LATEST_DATE = 'latest_date'
 
 class MarketDataset(Dataset):
     def __init__(self, data_df:pd.DataFrame, market_cols=ColNames.MARKET_COLS,
                   sent_cols=ColNames.SENTIMENT_COLS, target_cols:list=[ColNames.OPEN, ColNames.HIGH, ColNames.LOW, ColNames.CLOSE],
                   new_target_cols_names:list=ColNames.TARGET_COLS,
-                    lookback_window:int=30) -> None:
+                    lookback_window:int=30, null:bool=False) -> None:
         """
         Market Dataset class for 1st CNN-LSTM architecture version, where 
         
         :param data_df: DataFrame containing the merged and processed data
         :param seq_len: Length of the historical window for market data
         """
-        # Original price
-        if ColNames.VOLUME in market_cols and ColNames.VOLUME not in target_cols:
-            price_cols = target_cols + [ColNames.VOLUME]
+
+        if not null:
+            self.dataframe = data_df.sort_index()
+
+            # Original price
+            if ColNames.VOLUME in market_cols and ColNames.VOLUME not in target_cols:
+                price_cols = target_cols + [ColNames.VOLUME]
+            else:
+                price_cols = target_cols
+            self.raw_OHLCV = self.dataframe[price_cols]
+            
+            # Dataset-related constants
+            self.seq_len = lookback_window
+            self.valid_indices = np.arange(self.seq_len, len(self.dataframe))
+            self.ohlc_multiplier = 100 # Upscales the normalized value
+            self._original_cols_m = market_cols
+            self._original_cols_s = sent_cols
+            self._original_cols_t = target_cols
+
+
+            # Columns
+            self._price_cols = price_cols
+            self._technical_cols = []
+            self._normalized_cols = []
+            self._market_cols = market_cols
+            self._sent_cols = sent_cols
+            self._close_col = target_cols[-1] if target_cols else None
+            self._target_cols = self.derive_targets(target_cols, new_target_cols_names)
+
+            # Data and Arrays
+            self.years = self.dataframe[ColNames.YEAR].values.astype(np.int32)
+            self._market_data = self.dataframe[self._market_cols].values.astype(np.float32)
+            self._sentiment_data = self.dataframe[self._sent_cols].values.astype(np.float32)
+            self._target_data = self.dataframe[self._target_cols].values.astype(np.float32)
+            self._raw_prices = self.raw_OHLCV.values.astype(np.float32)
+
+            # Dates:
+            self.earliest_data_date = pd.to_datetime(self.dataframe[ColNames.DATE].iloc[0]).date()
+            self.latest_data_date = pd.to_datetime(self.dataframe[ColNames.DATE].iloc[-1]).date()
+
         else:
-            price_cols = target_cols
-        self.raw_OHLCV = data_df[price_cols]
-        
-        # Dataset-related constants
-        self.dataframe = data_df.sort_index()
-        self.seq_len = lookback_window
-        self.valid_indices = np.arange(self.seq_len, len(self.dataframe))
-        self.ohlc_multiplier = 100 # Upscales the normalized value
-        self._original_cols_m = market_cols
-        self._original_cols_s = sent_cols
-        self._original_cols_t = target_cols
+            self.dataframe = None
+            self.raw_OHLCV = None
+            self.seq_len = None
+            self.valid_indices = None
+            self.ohlc_multiplier = None # Upscales the normalized value
+            self._original_cols_m = None
+            self._original_cols_s = None
+            self._original_cols_t = None
+            # Columns
+            self._price_cols = None
+            self._technical_cols = None
+            self._normalized_cols = None
+            self._market_cols = None
+            self._sent_cols = None
+            self._close_col = None
+            self._target_cols = None
 
+            # Data and Arrays
+            self.years = None
+            self._market_data = None
+            self._sentiment_data = None
+            self._target_data = None
+            self._raw_prices = None
 
-        # Columns
-        self._price_cols = price_cols
-        self._technical_cols = []
-        self._normalized_cols = []
-        self._market_cols = market_cols
-        self._sent_cols = sent_cols
-        self._close_col = target_cols[-1]
-        self._target_cols = self.derive_targets(target_cols, new_target_cols_names)
-
-        # Data and Arrays
-        self.years = self.dataframe[ColNames.YEAR].values.astype(np.int32)
-        self._market_data = self.dataframe[self._market_cols].values.astype(np.float32)
-        self._sentiment_data = self.dataframe[self._sent_cols].values.astype(np.float32)
-        self._target_data = self.dataframe[self._target_cols].values.astype(np.float32)
-        self._raw_prices = self.raw_OHLCV.values.astype(np.float32)
+            # Dates:
+            self.earliest_data_date = None
+            self.latest_data_date = None
 
     def __len__(self) -> int:
         """Return number of valid samples in the dataset.
@@ -128,6 +169,47 @@ class MarketDataset(Dataset):
         
         return torch.tensor(mkt_data), torch.tensor(sent_data), torch.tensor(target), real_price
 
+    def set_new_state(self, raw_ohlcv_cols:list, close_col,  market_cols:list, sent_cols:list, target_cols:list, tech_cols:list, norm_cols:list,
+                    original_cols_m, original_cols_s, original_cols_t, dataframe, raw_ohlcv,
+                    years, market_data, sent_data, target_data, raw_prices, early_date, late_date, lookback_window:int, valid_indices:int, ohlc_multiplier:int):
+        
+        # Original price
+        self.dataframe = dataframe
+        self.raw_OHLCV = raw_ohlcv
+        
+        # Dataset-related constants
+        self.seq_len = lookback_window
+        self.valid_indices = np.arange(self.seq_len, len(dataframe))
+        self.ohlc_multiplier = 100 # Upscales the normalized value
+        self._original_cols_m = original_cols_m
+        self._original_cols_s = original_cols_s
+        self._original_cols_t = original_cols_t
+
+
+        # Columns
+        self._price_cols = raw_ohlcv_cols
+        self._technical_cols = tech_cols
+        self._normalized_cols = norm_cols
+        self._market_cols = market_cols
+        self._sent_cols = sent_cols
+        self._close_col = close_col
+        self._target_cols = target_cols
+
+        # Data and Arrays
+        self.years = years
+        self._market_data = market_data
+        self._sentiment_data = sent_data
+        self._target_data = target_data
+        self._raw_prices = raw_prices
+
+        # Dates:
+        self.earliest_data_date = early_date
+        self.latest_data_date = late_date
+
+        # Constants:
+        self.valid_indices = valid_indices
+        self.ohlc_multiplier = ohlc_multiplier
+
     def derive_targets(self, targeted_cols:list, target_cols:list=ColNames.TARGET_COLS):
         """Create shifted target columns from provided source columns.
 
@@ -138,12 +220,32 @@ class MarketDataset(Dataset):
         Returns:
             list[str]: Names of created target columns.
         """
+
+        if not target_cols:
+            return []
+        
+        j = len(target_cols)
+        while len(targeted_cols) > len(target_cols):
+            target_cols.append(f"Target_{targeted_cols[j]}")
+            j += 1
+        
+        self.cols_exists(targeted_cols, strict=True)
+        
         col_names = []
         for i, col in enumerate(targeted_cols):
             # Shift by -1 so that today's row contains tomorrow's target value
             self.dataframe[target_cols[i]] = self.dataframe[col].shift(-1)
             col_names.append(target_cols[i])
         return col_names
+
+    def sync_dates(self):
+        self.earliest_data_date = pd.to_datetime(self.dataframe[ColNames.DATE].iloc[0]).date()
+        self.latest_data_date = pd.to_datetime(self.dataframe[ColNames.DATE].iloc[-1]).date()
+
+    def preprocess(self):
+        self.apply_technicals()
+        self.normalize()
+        self.dropna()
 
     def apply_technicals(self, technicals:list=[ColNames.RSI, ColNames.SMA_20, ColNames.SMA_50,
                                                  ColNames.MACD, ColNames.MACD_SIG, ColNames.ATR,
@@ -273,9 +375,7 @@ class MarketDataset(Dataset):
                     new_market.append(ColNames.MACD_SIG_NORM)
                     old_market.append(ColNames.MACD_SIG)
                 case ColNames.ATR:
-                    df[ColNames.ATR_NORM] = df[ColNames.ATR] / df[ColNames.CLOSE] *10
-                    new_market.append(ColNames.ATR_NORM)
-                    old_market.append(ColNames.ATR)
+                    pass
                 case ColNames.SMA_20:
                     df[ColNames.SMA_20_NORM] = (df[ColNames.SMA_20] - 1) *10
                     new_market.append(ColNames.SMA_20_NORM)
@@ -346,6 +446,7 @@ class MarketDataset(Dataset):
         self._target_data = self.dataframe[self._target_cols].values.astype(np.float32)
         self._raw_prices = self.raw_OHLCV.values.astype(np.float32)
         self.valid_indices = np.arange(self.seq_len, len(self.dataframe))
+        self.sync_dates()
 
 
     def normalize_price(self, price, last_close):
@@ -431,17 +532,21 @@ class MarketDataset(Dataset):
         Returns:
             None
         """
+
         if new_market_cols is not None:
-            self._market_cols = new_market_cols
-            self._market_data = self.dataframe[self._market_cols].values.astype(np.float32)
+            if self.cols_exists(new_market_cols, strict=True):
+                self._market_cols = new_market_cols
+                self._market_data = self.dataframe[self._market_cols].values.astype(np.float32)
 
         if new_sent_cols is not None:
-            self._sent_cols = new_sent_cols
-            self._sentiment_data = self.dataframe[self._sent_cols].values.astype(np.float32)
+             if self.cols_exists(new_sent_cols, strict=True):
+                self._sent_cols = new_sent_cols
+                self._sentiment_data = self.dataframe[self._sent_cols].values.astype(np.float32)
 
         if new_target_cols is not None:
-            self._target_cols = new_target_cols
-            self._target_data = self.dataframe[self._target_cols].values.astype(np.float32)
+            if self.cols_exists(new_target_cols, strict=True):
+                self._target_cols = new_target_cols
+                self._target_data = self.dataframe[self._target_cols].values.astype(np.float32)
 
     def set_original_cols(self, new_origin_m, new_origin_s, new_origin_t):
         """Set a new tuple of original column lists used by `reset`.
@@ -466,6 +571,22 @@ class MarketDataset(Dataset):
         self._original_cols_m = new_origin_m
         self._original_cols_s = new_origin_s
         self._original_cols_t = new_origin_t
+
+    def cols_exists(self, cols:list, strict:bool=False):
+        """ Takes a list of columns and checks if they exist within the dataset dataframe. Returns False if at least one does not exist.
+            Else returns True.
+        """
+        all_cols = self.get_all_cols()
+        bad = []
+        for col in cols:
+            if col not in all_cols:
+                bad.append(col)
+        if bad:
+            if strict:
+                raise KeyError(f"The following columns do not exist in the dataframe: {bad}")
+            else:
+                return False
+        return True
 
     def get_tech_norm_cols(self):
         """Return the lists of technical and normalized column names.
@@ -601,7 +722,7 @@ class MarketDataset(Dataset):
             """
             return self.dataframe
 
-    def show_dataframe_interactive(self, subprocess:bool=False, which:int=0, custom:bool=False, option:str=["norm"]) -> None:
+    def show_dataframe_interactive(self, subprocess:bool=False, which:int=0, custom:bool=False, options:list=["active"]) -> None:
         """Open an interactive D-Tale session to explore the dataset.
 
         Parameters:
@@ -612,13 +733,14 @@ class MarketDataset(Dataset):
                 and raw OHLCV, 1 => processed dataframe only, 2 => raw OHLCV only.
             custom (bool): If set to true, in the dataframe will be displayed only the columns that one specifies in option.
                 Else prefixed options are applied as displayed below.
-            option ([str]): What to display. All options display at least Year and Date. Possible options are:
-                - "norm" - displays all the normalized columns (default)
+            options ([str]): What to display. All options display at least Year and Date. Possible options are:
+                - "norm" - displays all the normalized columns
                 - "tech" - displays all the technical indicators
                 - "ohlcv" - displays non-normalized OHLCV values
                 - "ohlcvN" - displays normalized OHLCV values
                 - "ohlc" - displays non-normalized OHLC values
                 - "ohlcN" - displays non-normalized OHLC values
+                - "active" - all currently active columns (default)
                 - [] - displays everything
                 Multiple options are possible.
         Returns:
@@ -633,22 +755,22 @@ class MarketDataset(Dataset):
                 display = dtale.show(self.raw_OHLCV, subprocess=True)
                 display.open_browser()
                 if custom:
-                    display = dtale.show(self.dataframe[time+option], subprocess=True)
+                    display = dtale.show(self.dataframe[time+options], subprocess=True)
                 else:
-                    if not option:
+                    if not options:
                         display = dtale.show(self.dataframe, subprocess=True)
                     else:
-                        cols = self._eval_option(option)
+                        cols = self._eval_option(options)
                         display = dtale.show(self.dataframe[time+cols], subprocess=True)
                 display.open_browser()
             case 1:
                 if custom:
-                    display = dtale.show(self.dataframe[time+option], subprocess=True)
+                    display = dtale.show(self.dataframe[time+options], subprocess=True)
                 else:
-                    if not option:
+                    if not options:
                         display = dtale.show(self.dataframe, subprocess=True)
                     else:
-                        cols = self._eval_option(option)
+                        cols = self._eval_option(options)
                         display = dtale.show(self.dataframe[time+cols], subprocess=True)
                 display.open_browser()
             case 2:
@@ -668,7 +790,9 @@ class MarketDataset(Dataset):
     def _eval_option(self, option:list):
         cols = []
         for opt in option:
-            match opt:
+            match opt.lower():
+                case "all":
+                    cols.extend([f for f in self.get_all_cols() if f not in [ColNames.DATE, ColNames.YEAR]])
                 case "norm":
                     cols.extend(self._normalized_cols)
                 case "tech":
@@ -689,6 +813,9 @@ class MarketDataset(Dataset):
                         if ColNames.NOT_TO_NORM_MAP(f) in self._normalized_cols and ColNames.NOT_TO_NORM_MAP(f) is not ColNames.VOLUME_NORM:
                             temp.append(f)
                     cols.extend(temp)
+                case "active":
+                    mkt, snt, tgt = self.get_active_cols()
+                    cols.extend(mkt+snt+tgt)
                 case _:
                     print("Unknown option")
         return cols
@@ -714,18 +841,20 @@ class MarketDataset(Dataset):
         """
 
         os.makedirs(folder_path, exist_ok=True)
-            
+
         # Save Numerical Data as binary
         payload = {
             PAY_TARGET_DATA: torch.from_numpy(self._target_data),
             PAY_MARKET_DATA: torch.from_numpy(self._market_data),
             PAY_SENTIMENT_DATA: torch.from_numpy(self._sentiment_data),
+            PAY_RAW_DATA: torch.from_numpy(self._raw_prices),
             PAY_INDICES: torch.from_numpy(self.valid_indices),
-            PAY_YEARS: torch.from_numpy(self.years),
+            PAY_YEARS: torch.from_numpy(np.asarray(self.years).astype(np.int32)),
             PAY_MARKET_COLS: self._market_cols,
             PAY_SENT_COLS: self._sent_cols,
             PAY_TARGET_COLS: self._target_cols,
-            PAY_TARGET_SOURCE_COLS: self._close_col,
+            CLOSE_COL: self._close_col,
+            RAW_COLS: self._price_cols,
             PAY_TARGET_NEW_NAMES: self._target_cols,
             PAY_ORIGINAL_COLS_M: self._original_cols_m,
             PAY_ORIGINAL_COLS_S: self._original_cols_s,
@@ -733,6 +862,8 @@ class MarketDataset(Dataset):
             PAY_TECHNICAL_COLS: self._technical_cols,
             PAY_NORMALIZED_COLS: self._normalized_cols,
             PAY_OHLC_MULTIPLIER: self.ohlc_multiplier,
+            PAY_EARLIEST_DATE: self.earliest_data_date.isoformat(),
+            PAY_LATEST_DATE: self.latest_data_date.isoformat(),
             PAY_SEQ_LEN: self.seq_len
         }
         torch.save(payload, os.path.join(folder_path, "tensors.pt"))
@@ -759,48 +890,36 @@ class MarketDataset(Dataset):
         Raises:
             FileNotFoundError: If expected files are missing from `folder_path`.
         """
-        # 1. Load the DataFrame
-        df = pd.read_parquet(os.path.join(folder_path, "dataframe.parquet"))
-
-        raw = pd.read_parquet(os.path.join(folder_path, "raw_OHLCV.parquet"))
         
-        # 2. Load the Tensors
-        payload = torch.load(os.path.join(folder_path, "tensors.pt"), weights_only=True)
+        payload = torch.load(os.path.join(folder_path, "tensors.pt"), weights_only=False)
 
-        market_cols = payload.get(PAY_MARKET_COLS)
-        sent_cols = payload.get(PAY_SENT_COLS)
-        target_source_cols = payload.get(PAY_TARGET_SOURCE_COLS)
-        target_new_names = payload.get(PAY_TARGET_NEW_NAMES)
+        instance = cls(None, market_cols=[], sent_cols=[],
+                   target_cols=[], new_target_cols_names=[], null = True)
 
-        # Create instance using the current constructor signature. This keeps
-        # the load path resilient to minor constructor refactors as long as
-        # the required column lists are present in the payload.
-        instance = cls(df, market_cols=market_cols, sent_cols=sent_cols,
-                   target_cols=target_source_cols, new_target_cols_names=target_new_names,
-                   lookback_window=payload.get(PAY_SEQ_LEN))
-
-        # Restore attributes and arrays from payload to ensure exact precision
-        instance.valid_indices = payload[PAY_INDICES].numpy()
-        instance.years = payload[PAY_YEARS].numpy()
-        instance._target_data = payload[PAY_TARGET_DATA].numpy()
-        instance._market_data = payload[PAY_MARKET_DATA].numpy()
-        instance._sentiment_data = payload[PAY_SENTIMENT_DATA].numpy()
-
-        # Restore metadata
-        instance._market_cols = market_cols
-        instance._sent_cols = sent_cols
-        instance._target_cols = payload.get(PAY_TARGET_NEW_NAMES, instance._target_cols)
-        instance._original_cols_m = payload.get(PAY_ORIGINAL_COLS_M, instance._original_cols_m)
-        instance._original_cols_s = payload.get(PAY_ORIGINAL_COLS_S, instance._original_cols_s)
-        instance._original_cols_t = payload.get(PAY_ORIGINAL_COLS_T, instance._original_cols_t)
-        instance._technical_cols = payload.get(PAY_TECHNICAL_COLS, instance._technical_cols)
-        instance._normalized_cols = payload.get(PAY_NORMALIZED_COLS, instance._normalized_cols)
-        instance.ohlc_multiplier = payload.get(PAY_OHLC_MULTIPLIER, instance.ohlc_multiplier)
-
-        # Restore raw OHLCV (kept as parquet for transparency) and compute
-        # the numpy array snapshot used by __getitem__.
-        instance.raw_OHLCV = raw
-        instance._raw_prices = raw.values.astype(np.float32)
+        instance.set_new_state(
+            raw_ohlcv_cols  =   payload.get(RAW_COLS),
+            close_col       =   payload[CLOSE_COL],
+            market_cols     =   payload.get(PAY_MARKET_COLS),
+            sent_cols       =   payload.get(PAY_SENT_COLS),
+            target_cols     =   payload.get(PAY_TARGET_NEW_NAMES, instance._target_cols),
+            tech_cols       =   payload.get(PAY_TECHNICAL_COLS, instance._technical_cols),
+            norm_cols       =   payload.get(PAY_NORMALIZED_COLS, instance._normalized_cols),
+            original_cols_m =   payload.get(PAY_ORIGINAL_COLS_M, instance._original_cols_m),
+            original_cols_s =   payload.get(PAY_ORIGINAL_COLS_S, instance._original_cols_s),
+            original_cols_t =   payload.get(PAY_ORIGINAL_COLS_T, instance._original_cols_t),
+            dataframe       =   pd.read_parquet(os.path.join(folder_path, "dataframe.parquet")),
+            raw_ohlcv       =   pd.read_parquet(os.path.join(folder_path, "raw_OHLCV.parquet")),
+            years           =   payload[PAY_YEARS].numpy(), 
+            market_data     =   payload[PAY_MARKET_DATA].numpy(), 
+            sent_data       =   payload[PAY_SENTIMENT_DATA].numpy(), 
+            target_data     =   payload[PAY_TARGET_DATA].numpy(), 
+            raw_prices      =   payload[PAY_RAW_DATA].numpy(), 
+            early_date      =   pd.to_datetime(payload.get(PAY_EARLIEST_DATE)).date(), 
+            late_date       =   pd.to_datetime(payload.get(PAY_LATEST_DATE)).date(),
+            ohlc_multiplier=   payload.get(PAY_OHLC_MULTIPLIER, instance.ohlc_multiplier),
+            lookback_window =   payload[PAY_SEQ_LEN],
+            valid_indices   =   payload[PAY_INDICES].numpy(),
+        )
 
         return instance
 
@@ -828,10 +947,10 @@ class MarketDataset(Dataset):
         dataset = cls(df, market_cols=market_cols, sent_cols=sent_cols, target_cols=tgt_cols, lookback_window=seq_len)
         
         return dataset
-
+    
     @classmethod
-    def load_data(cls, csv_path:str, json_path:str, 
-              market_cols = ['24h Open (USD)', '24h High (USD)', '24h Low (USD)', 'Closing Price (USD)', 'Trading Volume'],
+    def load_data(cls, csv_path:str="hist_data/stock_data/GLD.csv", json_path:str="News/finBERT_scores.json", 
+              market_cols = ['Open', 'High', 'Low', 'Close', 'Volume'],
                 market_new_cols = ColNames.MARKET_COLS) -> pd.DataFrame:
         """
         Load and merge market and sentiment data.
@@ -886,6 +1005,79 @@ class MarketDataset(Dataset):
         cols.insert(0, cols.pop(cols.index(ColNames.YEAR)))
         df = df[cols]
         return df
+    
+    def add_data(self, other_df: pd.DataFrame):
+        """Append historical data from another DataFrame to the dataset.
+
+        Parameters:
+            other_df (pandas.DataFrame): DataFrame with same structure as
+                `self.dataframe` to append before existing data.
+        Returns:
+            None: Mutates `self.dataframe` and internal arrays.
+        """
+
+        # 1. Combine dataframes
+        # We put other_df first so that keep='first' picks the new data
+        combined = pd.concat([other_df, self.dataframe], ignore_index=False)
+        
+        # 2. Handle duplicates: Keep the one from other_df (the first occurrences)
+        # This removes the old version from self.dataframe if it existed in other_df
+        combined = combined[~combined.index.duplicated(keep='first')]
+        
+        # 3. Sort by Date Index to ensure the timeline is chronological
+        # Critical for sliding window functions!
+        combined = combined.sort_index()
+
+        self.set_new_state(
+            raw_ohlcv_cols     =    self._price_cols, 
+            close_col          =    self._close_col, 
+            market_cols        =    self._market_cols, 
+            sent_cols          =    self._sent_cols, 
+            target_cols        =    self._target_cols, 
+            tech_cols          =    self._technical_cols, 
+            norm_cols          =    self._normalized_cols, 
+            original_cols_m    =    self._original_cols_m, 
+            original_cols_s    =    self._original_cols_s, 
+            original_cols_t    =    self._original_cols_t, 
+            dataframe          =    combined, 
+            raw_ohlcv          =    combined[self._price_cols], 
+            years              =    combined[ColNames.YEAR], 
+            market_data        =    combined[self._market_cols].values.astype(np.float32), 
+            sent_data          =    combined[self._sent_cols].values.astype(np.float32), 
+            target_data        =    combined[self._target_cols].values.astype(np.float32), 
+            raw_prices         =    combined[self._price_cols].values.astype(np.float32), 
+            early_date         =    None, 
+            late_date          =    None, 
+            lookback_window    =    self.seq_len, 
+            valid_indices      =    np.arange(self.seq_len, len(combined)), 
+            ohlc_multiplier    =    self.ohlc_multiplier,
+        )
+        self.sync_dates()
+
+    def add_hist_data(self, csv_path:str, json_path:str, 
+              market_cols = ['Open', 'High', 'Low', 'Close', 'Volume'],
+              market_new_cols = ColNames.MARKET_COLS):
+        """
+        Add historical data from a csv and json file. Method expects to find market data in csv file.
+        Code expects:
+            - In csv file to find a column 'Date' (YYYY-MM-DD) and columns specified in `market_cols`. These columns
+                will be renamed positionally to column names specified in `market_new_cols`. New names must match column names
+                of original dataframe.
+            - In json file to find dates as keys (YYYY-MM-DD) and list as values: `[sentiment_value_for_day, article_count_per_day]`
+        While loading, data will be joined on the market data (i.e. we can expect to have days with NaN values, but can never expect 
+        to have days with such values for market data).
+
+        Parameters:
+            csv_path (str): path to the market data csv file. E.g. `hist/GLD.csv`
+            json_path (str): path to the sentiment data json file. E.g. `hist/sent_scores.json`
+            market_cols (list(str)): list of columns names to be searched aside of `Data` within market csv file.
+            market_new_cols (list(str)): list of column names to which the `market_cols` will be renamed to match the original dataframe.
+        Returns:
+            None: Mutates `self.dataframe` and internal arrays.
+
+        """
+        df = MarketDataset.load_data(csv_path, json_path, market_cols, market_new_cols)
+        self.add_data(df)
 
 class MarketDataset2(MarketDataset):
     """A subclass of MarketDataset for 2nd CNN-LSTM architecture.
@@ -923,12 +1115,11 @@ class MarketDataset2(MarketDataset):
 if __name__ == "__main__":
 
     # dataset = MarketDataset2.form_dataset("hist_data/stock_data/GLD.csv", "News/finBERT_scores.json")
+    
+    # dataset.preprocess()
     # dataset.save()
 
     dataset = MarketDataset2.load()
-    dataset.apply_technicals()
-    dataset.normalize()
-    dataset.dropna()
-
-    
-    dataset.show_dataframe_interactive()    
+    # a, b, c = dataset.get_active_cols()
+    # print(dataset.dataframe[a+b+c].describe())
+    dataset.show_dataframe_interactive(options=["all"])

@@ -9,25 +9,19 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from Constants import ColNames
 import dataset_former
 import tensorflow as tf
+from datetime import datetime
 
 from abc import ABC, abstractmethod
 
 import logging 
 
-overwrite = False
 
-output_folder = "output"
-if overwrite:
-        os.makedirs(output_folder, exist_ok=True)
-else:
-    i = 1
-    base_folder = output_folder
-    while os.path.exists(output_folder):
-        output_folder = f"{base_folder}_{i}"
-        i += 1
-    os.makedirs(output_folder, exist_ok=True)
+timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+output_folder = f"results/{timestamp}"
+os.makedirs(output_folder, exist_ok=True)
 
 
 class LogOHLCLoss(nn.Module):
@@ -39,27 +33,39 @@ class LogOHLCLoss(nn.Module):
     def forward(self, pred, target):        
         # 1. Base Regression Loss (Standard Huber)
         base_loss = self.mse(pred, target)
-        
-        dim = pred.ndim
 
-        if pred.ndim == 4:
-            # 2. Log-Space Constraints
-            # High must be >= Open, Low, and Close
-            # If r_open - r_high > 0, it means Open is higher than High (Violation!)
+        # If model predicts O,H,L,C per sample (shape: [batch, 4]), apply structural penalties.
+        # Index mapping: 0=Open, 1=High, 2=Low, 3=Close
+        total_penalty = 0.0
+    
+        if pred.ndim == 2 and pred.size(1) >= 4:
+            # High should be >= Open, Low, Close -> penalize violations
             h_o_penalty = torch.mean(F.relu(pred[:, 0] - pred[:, 1]))
-            h_l_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 1])) # Low > High
+            h_l_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 1]))
             h_c_penalty = torch.mean(F.relu(pred[:, 3] - pred[:, 1]))
-            
-            # Low must be <= Open, High, and Close
-            # If r_low - r_open > 0, it means Low is higher than Open (Violation!)
+
+            # Low should be <= Open, High, Close -> penalize violations
             l_o_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 0]))
             l_c_penalty = torch.mean(F.relu(pred[:, 2] - pred[:, 3]))
+
             total_penalty = h_o_penalty + h_l_penalty + h_c_penalty + l_o_penalty + l_c_penalty
-        else:
-            total_penalty = 0
 
         return base_loss + (self.penalty_weight * total_penalty)
 
+def _extract_conv_feature_weights(model: nn.Module) -> np.ndarray:
+    """Extract mean absolute weights per input channel from the first Conv1d layer.
+
+    Returns an array of length equal to input channels. If no Conv1d found,
+    returns an empty numpy array.
+    """
+    for m in model.modules():
+        if isinstance(m, nn.Conv1d):
+            # weight shape: (out_channels, in_channels, kernel_size)
+            w = m.weight.data.abs().mean(dim=(0, 2)).cpu().numpy()
+            return w
+    return np.array([])
+
+        
 class Attention(nn.Module):
     def __init__(self, hidden_dim):
         super(Attention, self).__init__()
@@ -127,58 +133,119 @@ class PredictorSkeleton(ABC, nn.Module):
         print(f"Model loaded from Fold {checkpoint.get('fold', 'Unknown')}")
         return checkpoint.get('fold', 0)
 
-class GoldPredictor(PredictorSkeleton):
-    # Deprecicated
-    def __init__(self, mkt_feat_dim, sent_feat_dim, hidden_dim=64):
-        super(GoldPredictor, self).__init__()
-        self.cnn3 = nn.Conv1d(mkt_feat_dim, int(np.ceil(hidden_dim/2)), kernel_size=3, padding=1)
-        self.cnn5 = nn.Conv1d(mkt_feat_dim, int(np.floor(hidden_dim/2)), kernel_size=5, padding=2)
+class GoldPredictorAttention(PredictorSkeleton):
+    def __init__(self, mkt_feat_dim, sent_feat_dim, hidden_dim=64, target_dim=4):
+        super(GoldPredictorAttention, self).__init__()
         
-        # --- Market Branch (CNN + Bi-LSTM) ---
-        #self.cnn = nn.Conv1d(in_channels=mkt_feat_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
+        total_feat_dim = mkt_feat_dim + sent_feat_dim
+        
+        # 1. CNN Branch: Feature Extraction
+        self.cnn5 = nn.Conv1d(total_feat_dim, hidden_dim, kernel_size=5, padding=2)
+        self.relu_cnn = nn.ReLU()
+        self.pool = nn.MaxPool1d(kernel_size=2)
+        self.dropout_cnn = nn.Dropout(0.2)
+        
+        # 2. LSTM Branch: Temporal Dependencies
+        # Bidirectional LSTM doubles the hidden dimension for the output
         self.lstm = nn.LSTM(hidden_dim, hidden_dim, batch_first=True, bidirectional=True)
-        self.attention = Attention(hidden_dim * 2) # *2 for Bidirectional
         
-        # --- Sentiment Branch ---
-        sent_inner = 32
-        self.sent_mlp = nn.Sequential(
-        nn.Linear(sent_feat_dim, sent_inner),
-        nn.BatchNorm1d(sent_inner), # Keeps sentiment features from being "washed out"
-        nn.ReLU(),
-        nn.Dropout(0.1))
+        # 3. Attention Layer
+        # It takes the Bi-LSTM output (hidden_dim * 2) and calculates weights
+        self.attention = Attention(hidden_dim * 2) 
         
-        # --- Fusion Head ---
-        # (hidden_dim * 2 from Bi-LSTM) + 16 from Sentiment
+        # 4. Dense Head: Final Prediction
         self.fc_fusion = nn.Sequential(
-            nn.Linear((hidden_dim * 2) + sent_inner, 64),
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(64, 4) # Predicts [Open, High, Low, Close]
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, target_dim) 
         )
 
     def forward(self, mkt_seq, sent_vec):
-        # mkt_seq: (batch, seq_len, mkt_feat_dim)
+        # Early Fusion of Market + Sentiment
+        combined = torch.cat((mkt_seq, sent_vec), dim=2) # (batch, seq_len, total_dim)
+        
+        # CNN Processing
+        x = combined.transpose(1, 2) # (batch, total_dim, seq_len)
+        x = self.relu_cnn(self.cnn5(x))
+        x = self.pool(x)
+        x = self.dropout_cnn(x)
+        
+        # LSTM Processing
+        x = x.transpose(1, 2) # (batch, reduced_seq_len, hidden_dim)
+        lstm_out, _ = self.lstm(x) # (batch, reduced_seq_len, hidden_dim * 2)
+        
+        # --- ATTENTION STEP ---
+        # Instead of taking just the last hidden state, we weigh the whole sequence
+        # context shape: (batch, hidden_dim * 2)
+        context, attn_weights = self.attention(lstm_out)
+        
+        # Dense Head
+        output = self.fc_fusion(context)
+        
+        return output
+
+class GoldPredictor(PredictorSkeleton):
+    def __init__(self, mkt_feat_dim, sent_feat_dim, hidden_dim=64, target_dim=4):
+        super(GoldPredictor, self).__init__()
+        
+        total_feat_dim = mkt_feat_dim + sent_feat_dim
+        
+        # 1. CNN Branch
+        # Input -> CNN + ReLU
+        self.cnn5 = nn.Conv1d(total_feat_dim, hidden_dim, kernel_size=5, padding=2)
+        self.relu_cnn = nn.ReLU()
+        
+        # 2. Pooling + Dropout
+        # Using MaxPool1d to reduce temporal dimensionality/noise
+        self.pool = nn.MaxPool1d(kernel_size=2)
+        self.dropout_cnn = nn.Dropout(0.2)
+        
+        # 3. LSTM Branch
+        # Adjusting input_size because Pooling reduced the sequence length, 
+        # but hidden_dim (channels) remains the same.
+        self.lstm = nn.LSTM(hidden_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.relu_lstm = nn.ReLU()
+        
+        # 4. Dense Head
+        # hidden_dim * 2 because LSTM is bidirectional
+        self.fc_fusion = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, target_dim) # No Softmax for regression
+        )
+
+    def forward(self, mkt_seq, sent_vec):
+        # Merge Market and Sentiment (Early Fusion)
+        # mkt_seq: (batch, seq_len, mkt_dim)
+        # sent_vec: (batch, seq_len, sent_dim)
+        combined = torch.cat((mkt_seq, sent_vec), dim=2)
+        
         # CNN expects (batch, channels, seq_len)
-        mkt_seq = mkt_seq.transpose(1, 2)
-        mkt_cnn3 = F.relu(self.cnn3(mkt_seq))
-        mkt_cnn5 = F.relu(self.cnn5(mkt_seq))
+        x = combined.transpose(1, 2)
         
-        # Concatenate along the channel dimension
-        mkt_cnn = torch.cat((mkt_cnn3, mkt_cnn5), dim=1)
+        # Input -> CNN + ReLU
+        x = self.relu_cnn(self.cnn5(x))
         
+        # -> Pooling -> Dropout
+        x = self.pool(x)
+        x = self.dropout_cnn(x)
+        
+        # -> LSTM + ReLU
         # Back to (batch, seq_len, hidden_dim) for LSTM
-        mkt_cnn = mkt_cnn.transpose(1, 2)
-        lstm_out, _ = self.lstm(mkt_cnn)
+        x = x.transpose(1, 2)
+        lstm_out, (hn, cn) = self.lstm(x)
         
-        # Attention pooling
-        mkt_context, _ = self.attention(lstm_out)
+        # We use the final hidden state for the Dense layer 
+        # (Concatenate forward and backward last hidden states)
+        # Shape of hn: (num_layers * num_directions, batch, hidden_dim)
+        last_hidden = torch.cat((hn[-2,:,:], hn[-1,:,:]), dim=1)
+        x = self.relu_lstm(last_hidden)
         
-        # Sentiment Branch
-        sent_context = self.sent_mlp(sent_vec)
+        # -> Dense + ReLU -> Dropout -> Output
+        output = self.fc_fusion(x)
         
-        # Late Fusion
-        combined = torch.cat((mkt_context, sent_context), dim=1)
-        output = self.fc_fusion(combined)
         return output
 
 class GoldPredictor2(PredictorSkeleton):
@@ -228,7 +295,9 @@ class GoldPredictor2(PredictorSkeleton):
         output = self.fc_fusion(mkt_context)
         return output
 
-def train_model(model, device, train_loader, val_loader, market_cols, sent_cols, epochs=50, lr=0.0005, logger=None, debug=False, early_stop = False):
+def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
+                epochs=50, lr=0.0005, logger=None, debug=False, early_stop=False,
+                dataset_denorm_fn=None):
     """
     Proposed hyperparameters in the paper 'Implementation of Long Short-Term Memory for Gold Prices Forecasting'
     are: epoch = 100, LR = 0.01 with Adam optimizer, and expanding window.
@@ -239,7 +308,7 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
     
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     # Allow for adaptive learning rate:
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
 
     if early_stop:
         stopper = EarlyStopping(patience=10)
@@ -266,6 +335,8 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
             loss.backward()
             optimizer.step()
             train_losses.append(loss.item())
+
+            
             
         # Validation
         model.eval()
@@ -276,17 +347,22 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
         all_real_prices = []
 
         with torch.no_grad():
-
-            # Fetching model weights:
-
-            #mkt_w3 = model.cnn3.weight.abs().mean(dim=(0, 2)) 
-            mkt_w5 = model.cnn5.weight.abs().mean(dim=(0, 2))
-            #mkt_weights = (mkt_w3 + mkt_w5) / 2 # Average of both CNN paths
-            mkt_weights = mkt_w5
-            all_current_weights = mkt_weights.cpu().numpy()
+            # Extract conv input-channel importance if available
+            conv_weights = _extract_conv_feature_weights(model)
+            if conv_weights.size:
+                all_current_weights = conv_weights
+            else:
+                # fallback: try to probe common attribute names
+                try:
+                    all_current_weights = model.cnn5.weight.abs().mean(dim=(0, 2)).cpu().numpy()
+                except Exception:
+                    all_current_weights = np.zeros(len(feature_names))
 
             for i, name in enumerate(feature_names):
-                weight_history[name].append(all_current_weights[i])
+                if i < len(all_current_weights):
+                    weight_history[name].append(float(all_current_weights[i]))
+                else:
+                    weight_history[name].append(0.0)
 
             # Validation loop
             for mkt_data, sent_data, targets, real_price in val_loader:
@@ -303,6 +379,13 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
         all_val_preds = torch.cat(all_val_preds, dim=0).numpy()
         all_val_targets = torch.cat(all_val_targets, dim=0).numpy()
         all_real_prices = torch.cat(all_real_prices, dim=0).numpy()
+
+        # Sanity check"
+        logger.info("\nSanity CHECK:")
+        logger.info(f"DBG shapes: {all_val_preds.shape}, {all_val_targets.shape}, {all_real_prices.shape}")
+        logger.info(f"DBG preds stats: min={np.min(all_val_preds)}, max={np.max(all_val_preds)}, median={np.median(all_val_preds)}, std={np.std(all_val_preds)}")
+        logger.info(f"DBG actuals stats: min={np.min(all_val_targets)}, max={np.max(all_val_targets)}, median={np.median(all_val_targets)}, std={np.std(all_val_targets)}")
+
         
 
         avg_train_loss = sum(train_losses) / len(train_losses)
@@ -324,10 +407,16 @@ def train_model(model, device, train_loader, val_loader, market_cols, sent_cols,
                 logger.info(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
                 logger.info(f"Current LR: {current_lr:.6f}")
 
-        # Calculate trading metrics on validation set
+        # Calculate trading metrics on validation set using normalized arrays
         epsilon_pct = 0.002
-        val_metrics = calculate_trading_metrics(all_val_preds, all_val_targets, epsilon_pct=epsilon_pct, last_close_prices=all_real_prices)            
-    
+        val_metrics = calculate_trading_metrics(all_val_preds, all_val_targets, epsilon_pct=epsilon_pct, last_close_prices=all_real_prices, dataset_denorm_func=dataset_denorm_fn)
+
+        # Adding val metrics to the history for performance plotting
+        history.setdefault('directional_accuracy', []).append(val_metrics.get('directional_accuracy', np.nan))
+        history.setdefault('epsilon_accuracy', []).append(val_metrics.get('epsilon_accuracy', np.nan))
+        history.setdefault('mape', []).append(val_metrics.get('mape', np.nan))
+
+
         if logger:
             logger.info(f"Epoch {epoch}:")
             logger.info(f"  - Range Coverage: {val_metrics['range_coverage']:.2%}")
@@ -391,7 +480,7 @@ def feature_engineering(train_loader, val_loader, mkt_cols, sent_cols, device, l
     
     return final_model, filtered_mkt, filtered_sent
 
-def evaluate_test_set(model, test_loader, logger=None, scaler_target=None, debug=False):
+def evaluate_test_set(model, test_loader, logger=None, scaler_target=None, debug=False, dataset_denorm_fn=None, filename=f"{output_folder}/performance_summary.png"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
     
@@ -426,20 +515,25 @@ def evaluate_test_set(model, test_loader, logger=None, scaler_target=None, debug
     all_actuals = torch.cat(all_actuals, dim=0).numpy()
     all_real_prices = torch.cat(all_real_prices, dim=0).numpy()
 
+
     # --- Metric 1: RMSE (Regression Error) ---
     mse = np.mean((all_preds - all_actuals)**2)
     rmse = np.sqrt(mse)
 
      # --- Metric 2: Trading Metrics ---
     epsilon_pct = 0.002
-    val_metrics = calculate_trading_metrics(all_preds, all_actuals, epsilon_pct=epsilon_pct, last_close_prices=all_real_prices)
+    val_metrics = calculate_trading_metrics(all_preds, all_actuals, epsilon_pct=epsilon_pct, last_close_prices=all_real_prices, dataset_denorm_func=dataset_denorm_fn)
 
     # --- MEtric 3: Backtest Strategy ---
-    results = backtest_with_costs(all_preds, all_actuals, threshold=0.002, fee=0.0003)
+
+    print("preds range:", all_preds.min(), all_preds.max(), "median:", np.median(np.abs(all_preds)))
+    print("targets range:", all_actuals.min(), all_actuals.max(), "median:", np.median(np.abs(all_actuals)))
+
+    results = backtest_with_costs(all_preds, all_actuals)
 
     # --- Metric 4: Threshold Sensitivity Analysis ---
     find_best_threshold(all_preds, all_actuals, logger)
-
+    
     if not logger:
         print(f"--- Final Test Results ---")
         print(f"Test RMSE: {rmse:.4f}")
@@ -485,9 +579,9 @@ def evaluate_test_set(model, test_loader, logger=None, scaler_target=None, debug
     
 
     #plotting
-    plot_model_results(all_preds, all_actuals, results)
+    plot_model_results(all_preds, all_actuals, results, filename=filename)
 
-    return all_preds, all_actuals, val_metrics
+    return all_preds, all_actuals, val_metrics, all_real_prices
 
 def identify_low_importance_features(importances, threshold=0.0001):
     """
@@ -546,7 +640,7 @@ def setup_logger(filename : str = f"{output_folder}/model_train.log"):
     )
     return logging.getLogger()
 
-def calculate_trading_metrics(preds, targets, epsilon_pct=0.002, last_close_prices=None):
+def calculate_trading_metrics(preds, targets, epsilon_pct, last_close_prices, dataset_denorm_func):
     """Calculate trading-related metrics given predictions and targets.
 
     The function assumes Gold price normalization as logarithmic return with the division in the logarithmic function from the last day close price. All multiplied by 100.
@@ -565,6 +659,7 @@ def calculate_trading_metrics(preds, targets, epsilon_pct=0.002, last_close_pric
     :param targets: np.array of shape (num_samples, 4) - actual log-returns [O,H,L,C]
     :param epsilon_pct: float - threshold for epsilon accuracy (e.g., 0.002 for 0.2%)
     :param last_close_prices: np.array of shape (num_samples, 4) - last known real prices [O,H,L,C] before prediction
+    :param dataset_denorm_func: function - a function that takes (preds, last_close_prices) and returns denormalized prices in USD.
     :return: dict with metrics: range_coverage, epsilon_accuracy, directional_accuracy, mae, mape, max_pred_move, avg_pred_move. Note that that range coverage might return a `np.nan` if the target does not contain [H, L, C].
     """
 
@@ -604,16 +699,16 @@ def calculate_trading_metrics(preds, targets, epsilon_pct=0.002, last_close_pric
     # Log space
     mae = np.mean(np.abs(preds - targets))
     if num_cols > 2:
-        if last_close_prices is not None:
+        if last_close_prices is not None and dataset_denorm_func is not None:
             last_close = last_close_prices[:, 3] 
 
             # Convert predicted log-returns back to USD
-            pred_high_usd  = last_close * np.exp(preds[:, h_idx]/100)  # High
-            pred_low_usd   = last_close * np.exp(preds[:, l_idx]/100)  # Low
-            pred_close_usd = last_close * np.exp(preds[:, c_idx]/100)  # Close
+            pred_high_usd  = dataset_denorm_func(preds[:, h_idx], last_close) # High
+            pred_low_usd   = dataset_denorm_func(preds[:, l_idx], last_close) # Low
+            pred_close_usd = dataset_denorm_func(preds[:, c_idx], last_close)  # Close
 
             # Convert target log-returns back to USD
-            actual_close_usd = last_close * np.exp(targets[:, c_idx] /100)  # Close
+            actual_close_usd = dataset_denorm_func(targets[:, c_idx], last_close)  # Close Target
 
             # MAPE (Price-based)
             mape = np.mean(np.abs((actual_close_usd - pred_close_usd) / actual_close_usd)) * 100
@@ -646,7 +741,7 @@ def calculate_trading_metrics(preds, targets, epsilon_pct=0.002, last_close_pric
         "avg_pred_move": avg_pred_move
     }
 
-def backtest_with_costs(preds, targets, initial_capital=1000.0, threshold=0.01, fee=0.0005):
+def backtest_with_costs(preds, targets, initial_capital=1000.0, threshold=0.001, fee=0.0005):
     """
     Simulates trading with compounding returns and transaction fees.
     """
@@ -702,17 +797,18 @@ def find_best_threshold(preds, targets, logger=None):
     print("\n--- Threshold Sensitivity Analysis ---")
     print(f"{'Threshold':<12} | {'Trades':<8} | {'Final Value':<12} | {'Sharpe'}")
     print("-" * 50)
-    
+
+    # Sensible thresholds in fractional decimal: 0.1% -> 0.001, 0.2% -> 0.002
+    thresholds = [0.001, 0.002, 0.003, 0.005] 
+
     if not logger:
-        # Test thresholds from 0.05% to 0.5%
-        for t in [0.0005, 0.001, 0.0015, 0.002, 0.003, 0.005]:
+        for t in thresholds:
             res = backtest_with_costs(preds, targets, threshold=t, fee=0.0003)
-            print(f"{t*100:>9.2f}% | {res['num_trades']:>8} | ${res['final_value']:>10.2f} | {res['sharpe_ratio']:>6.2f}")
+            print(f"{t*100:>9.3f}% | {res['num_trades']:>8} | ${res['final_value']:>10.2f} | {res['sharpe_ratio']:>6.2f}")
     else:
-        # Test thresholds from 0.05% to 0.5%
-        for t in [0.0005, 0.001, 0.0015, 0.002, 0.003, 0.005]:
+        for t in thresholds:
             res = backtest_with_costs(preds, targets, threshold=t, fee=0.0003)
-            logger.info(f"{t*100:>9.2f}% | {res['num_trades']:>8} | ${res['final_value']:>10.2f} | {res['sharpe_ratio']:>6.2f}")
+            logger.info(f"{t*100:>9.3f}% | {res['num_trades']:>8} | ${res['final_value']:>10.2f} | {res['sharpe_ratio']:>6.2f}")
 
 def save_predictions_csv(preds, targets, filename=f"{output_folder}/gold_predictions.csv"):
     df = pd.DataFrame({
@@ -725,7 +821,7 @@ def save_predictions_csv(preds, targets, filename=f"{output_folder}/gold_predict
     df.to_csv(filename, index=False)
     print(f"saved {len(df)} predictions to {filename}")
 
-def plot_model_results(preds, targets, backtest_results, filename=f"{output_folder}/performance_summary.png", overwrite = False):
+def plot_model_results(preds, targets, backtest_results, filename=f"{output_folder}/performance_summary.png"):
     """
     4-Panel Dashboard: Equity, Drawdown, Prediction Scatter, and Error Histogram.
     """
@@ -746,16 +842,23 @@ def plot_model_results(preds, targets, backtest_results, filename=f"{output_fold
     # --- 2. Drawdown (The "Pain" Graph) ---
     ax2 = axes[1]
     equity = backtest_results['equity_curve']
-    # Calculate running maximum
-    running_max = np.maximum.accumulate(equity)
-    # Calculate percentage drop from that max
-    drawdown = (equity - running_max) / running_max
-    
-    ax2.fill_between(range(len(drawdown)), drawdown, 0, color='red', alpha=0.3)
-    ax2.plot(drawdown, color='red', linewidth=1)
-    ax2.set_title("Strategy Drawdown (%)", fontsize=14, fontweight='bold')
-    ax2.set_ylabel("Drop from Peak")
-    ax2.set_ylim([None, 0.02]) # Set upper limit to 0 to emphasize drops
+    buy_and_hold = backtest_results['buy_and_hold']
+
+    # Plot strategy vs buy-and-hold
+    ax2.plot(equity, label='Strategy', color='gold', linewidth=1.5)
+    ax2.plot(buy_and_hold, label='Buy & Hold', color='black', linestyle='--', alpha=0.6)
+
+    # Difference between strategy and buy-and-hold to show periods of out/under-performance
+    diff = equity - buy_and_hold
+    pos = np.clip(diff, a_min=0, a_max=None)
+    neg = np.clip(diff, a_min=None, a_max=0)
+
+    ax2.fill_between(range(len(diff)), 0, pos, color='green', alpha=0.3, label='Outperformance')
+    ax2.fill_between(range(len(diff)), 0, neg, color='red', alpha=0.3, label='Underperformance')
+
+    ax2.set_title("Strategy vs Buy & Hold (Green = outperformance, Red = underperformance)", fontsize=12)
+    ax2.set_ylabel("Value ($)")
+    ax2.legend(loc='upper left')
     ax2.grid(alpha=0.2)
 
     # --- 3. Prediction vs Actual (Magnitude) ---
@@ -780,16 +883,7 @@ def plot_model_results(preds, targets, backtest_results, filename=f"{output_fold
     ax4.grid(alpha=0.2)
     
     plt.tight_layout()
-
-    i = 1
-    while os.path.isfile(filename) and not overwrite:
-        parts = filename.split(".")
-        filename = parts[0] + f"_{i}" + f".{parts[1]}"
-        i += 1
-    
-    
     plt.savefig(filename, dpi=150)
-    plt.show() # If using Jupyter/Colab
     print(f"Dashboard saved as {filename}")
 
 def plot_maw_progression(weight_history, fold_num, filename=f"{output_folder}/maw_progression.png"):
@@ -804,7 +898,6 @@ def plot_maw_progression(weight_history, fold_num, filename=f"{output_folder}/ma
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.tight_layout()
     plt.savefig(filename)
-    plt.show()
 
 def plot_feature_weights(model, feature_names, filename=f"{output_folder}/feature_weights.png"):
     # model.cnn3 is the first layer. Shape: (out_channels, in_channels, kernel_size)
@@ -1015,6 +1108,110 @@ def plot_interpretability_report(model, val_loader, mkt_cols, sent_cols, fold, f
     plt.close()
     print(f"Report for Fold {fold} saved to {filename}")
 
+def plot_training_history(history:dict, metrics:dict=None, filename:str=f"{output_folder}/training_history.png"):
+    """
+    Plot train/val loss and optional metric series (e.g. directional_accuracy) on a secondary axis.
+    - history: {'train_loss': [...], 'val_loss': [...], ...}
+    - metrics: optional dict of name->list (same length as losses)
+    """
+    import matplotlib.pyplot as plt
+    epochs = list(range(1, len(history.get('train_loss', [])) + 1))
+    plt.figure(figsize=(10,5))
+    plt.plot(epochs, history.get('train_loss', []), label='Train Loss', color='tab:blue')
+    plt.plot(epochs, history.get('val_loss', []), label='Val Loss', color='tab:orange')
+    plt.xlabel("Epoch")
+    plt.grid(alpha=0.3)
+    ax = plt.gca()
+
+    if metrics:
+        ax2 = ax.twinx()
+        colors = ['tab:green','tab:red','tab:purple','tab:brown']
+        for i, (name, series) in enumerate(metrics.items()):
+            ax2.plot(epochs, series, label=name, color=colors[i % len(colors)], linestyle='--')
+        ax2.set_ylabel("Metric")
+        # combine legends
+        lines, labels = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines + lines2, labels + labels2, loc='upper left')
+    else:
+        ax.legend(loc='upper left')
+
+    plt.title("Training History")
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150)
+    plt.close()
+
+# ...existing code...
+def plot_close_pred_vs_actual(preds, actuals, last_close=None, denorm_fn=None, c_id=-1,
+                              filename=f"{output_folder}/pred_vs_actual_close.png"):
+    """
+    Plot predicted vs actual close price time-series.
+
+    Args:
+        preds (np.ndarray|torch.Tensor): model outputs (N, *) or (N,) — if multicolumn, c_id selects close.
+        actuals (np.ndarray|torch.Tensor): ground-truth values (same shape as preds).
+        last_close (np.ndarray): last-known close prices (USD) used for denorm (length N). Required if denorm_fn provided.
+        denorm_fn (callable): function(pred_column, last_close) -> USD prices. If None, preds/actuals assumed USD already.
+        c_id (int): column index for close in preds/actuals (default -1).
+        filename (str): path to save PNG.
+
+    Returns:
+        dict: { 'rmse', 'mae', 'corr' } computed on USD prices used in the plot.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as _np
+    import torch as _torch
+
+    # convert to numpy
+    if isinstance(preds, _torch.Tensor):
+        preds = preds.detach().cpu().numpy()
+    if isinstance(actuals, _torch.Tensor):
+        actuals = actuals.detach().cpu().numpy()
+
+    # select close column if multi-dim
+    if preds.ndim > 1:
+        pred_col = preds[:, c_id]
+    else:
+        pred_col = preds.ravel()
+    if actuals.ndim > 1:
+        actual_col = actuals[:, c_id]
+    else:
+        actual_col = actuals.ravel()
+
+    # denormalize if requested
+    if denorm_fn is not None:
+        if last_close is None:
+            raise ValueError("last_close is required when denorm_fn is provided")
+        pred_usd = _np.asarray(denorm_fn(pred_col, _np.asarray(last_close)))
+        actual_usd = _np.asarray(denorm_fn(actual_col, _np.asarray(last_close)))
+    else:
+        pred_usd = _np.asarray(pred_col)
+        actual_usd = _np.asarray(actual_col)
+
+    # metrics
+    rmse = float(_np.sqrt(_np.mean((_np.nan_to_num(pred_usd) - _np.nan_to_num(actual_usd))**2)))
+    mae = float(_np.mean(_np.abs(pred_usd - actual_usd)))
+    corr = float(_np.corrcoef(pred_usd, actual_usd)[0,1]) if pred_usd.size > 1 else float('nan')
+
+    # plot
+    x = _np.arange(len(pred_usd))
+    plt.figure(figsize=(12,5))
+    plt.plot(x, actual_usd, label='Actual Close', color='black', linewidth=1.5)
+    plt.plot(x, pred_usd, label='Predicted Close', color='tab:blue', linewidth=1.2, alpha=0.9)
+    plt.fill_between(x, actual_usd, pred_usd, where=(pred_usd>actual_usd), color='green', alpha=0.18, interpolate=True, label='Overprediction')
+    plt.fill_between(x, actual_usd, pred_usd, where=(pred_usd<actual_usd), color='red', alpha=0.18, interpolate=True, label='Underprediction')
+    plt.title(f"Predicted vs Actual Close — RMSE={rmse:.2f}, MAE={mae:.2f}, Corr={corr:.3f}")
+    plt.xlabel("Sample Index")
+    plt.ylabel("Close Price (USD)")
+    plt.legend(loc='upper left')
+    plt.grid(alpha=0.2)
+    plt.tight_layout()
+
+    plt.savefig(filename, dpi=150)
+    plt.close()
+
+    return {"rmse": rmse, "mae": mae, "corr": corr}
+
 def main():
     global output_folder
 
@@ -1023,11 +1220,10 @@ def main():
 
     # ========= HYPER PARAMS ===========
     automatic_feature_engineering = False
-    early_stop = True
+    early_stop = False
 
-    # ['Target_Open', 'Target_High', 'Target_Low', 'Target_Close']
-    targets = ['Target_Close']
-    not_considered_feat = [] #['SMA_20_Rel', 'ATR_Pct', 'MACD_Sig_Z', 'SMA_50_Rel']
+    targets = [ColNames.TARGET_C_NORM]
+    not_considered_feat = [] #[ColNames.MACD_SIG_NORM, ColNames.RSI_NORM, ColNames.SMA_20_NORM, ColNames.SMA_50_NORM]
     mkt_cols = [f for f in dataset._market_cols if f not in not_considered_feat]
     sent_cols = [f for f in dataset._sent_cols if f not in not_considered_feat]
 
@@ -1037,15 +1233,13 @@ def main():
     sent_feat_dim = len(sent_cols) # 2 features
 
     target_dim = len(targets)
-    hidden_dim = 32
+    hidden_dim = 64
     batch_size = 64
     epochs = 100
-    learning_rate = 0.0005
+    learning_rate = 0.001
     feature_threshold = 0
-    output_folder = "output"
     data_split = "expanding_window" 
     #data_split = "sliding_window"
-    overwrite = False
 
     feature_names = mkt_cols + sent_cols
     #-----------------------------------------
@@ -1055,9 +1249,13 @@ def main():
     logger.info("Hyperparameters:")
     logger.info(f"  - Automatic Feature Engineering: {automatic_feature_engineering}")
     logger.info(f"  - Early Stopping: {early_stop}")
-    logger.info(f"Targets: {targets}")
+    logger.info(f"----------  FEATURES  --------")
+    logger.info(f"  - Targets: {targets}")
     logger.info(f"  - Market Features: {mkt_cols}")
     logger.info(f"  - Sentiment Features: {sent_cols}")
+    logger.info(f"  - Not considered Features: {not_considered_feat}")
+    logger.info(f"-------------------------------")
+    logger.info(f"Model Configuration:")
     logger.info(f"  - Hidden Dim: {hidden_dim}")
     logger.info(f"  - Batch Size: {batch_size}")
     logger.info(f"  - Epochs: {epochs}")
@@ -1066,7 +1264,6 @@ def main():
     logger.info(f"  - Output Folder: {output_folder}")
     logger.info(f"  - Data Split: {data_split}")
     logger.info(f"  - Architecture 2: CNN + LSTM + Attention")
-    logger.info(f"  - Overwrite: {overwrite}")
     logger.info("-" * 50)
     logger.info(f"Additional information:")
     logger.info(f"  - cnn5 only")
@@ -1082,7 +1279,8 @@ def main():
         dataset.set_active_cols(mkt_cols, sent_cols)
         feature_names = mkt_cols + sent_cols
     else:
-        model = GoldPredictor2(mkt_feat_dim, sent_feat_dim, hidden_dim, target_dim)
+        #model = GoldPredictor(mkt_feat_dim, sent_feat_dim, hidden_dim, target_dim)
+        model = GoldPredictor(mkt_feat_dim, sent_feat_dim, hidden_dim, target_dim)
 
     # Weights collection
     weights = {name: [] for name in feature_names}
@@ -1090,22 +1288,32 @@ def main():
     # Cross-Validation Folds
     fold_num = 0
     for train_loader, val_loader, test_loader, test_year in dataset.get_loaders(training_setting="expanding_window", batch_size=batch_size):
-
         fold_num += 1
+        if fold_num < 5:
+            continue
 
         logger.info(f"\n\n ==============> Starting Fold {fold_num} | Test Year: {test_year}")
         
         # Train Model
-        history, optimizer, fold_weights = train_model(model, device, train_loader, val_loader, market_cols=mkt_cols, sent_cols=sent_cols, epochs=epochs, lr=learning_rate, logger=logger, early_stop=early_stop)
+        history, optimizer, fold_weights = train_model(model, device, train_loader, val_loader, market_cols=mkt_cols, sent_cols=sent_cols, epochs=epochs, lr=learning_rate, logger=logger, early_stop=early_stop, dataset_denorm_fn=dataset.unnormalize_price)
+        
+        # metrics plotting:
+        #metrics_to_plot = {k: history[k] for k in ('directional_accuracy','epsilon_accuracy','mape') if k in history}
+        plot_training_history(history,  filename=f"{output_folder}/training_history{fold_num}.png") #metrics=metrics_to_plot,
         
         for name in feature_names:
             weights[name].extend(fold_weights[name])
 
 
-        #                                        TODO
+        #TODO
         # Evaluate on Test Set
-        all_preds, all_actuals, performance = evaluate_test_set(model, test_loader,  logger=logger)
+        all_preds, all_actuals, performance, all_real_prices = evaluate_test_set(model, test_loader,  logger=logger,  dataset_denorm_fn=dataset.unnormalize_price, filename=f"{output_folder}/performance_summary{fold_num}.png")
         
+        # --- Metric: Plotting pred vs. actual close price
+        last_close = all_real_prices[:, 3]
+        plot_close_pred_vs_actual(all_preds, all_actuals, last_close=last_close, denorm_fn=dataset.unnormalize_price,
+                             c_id=-1, filename=f"{output_folder}/pred_vs_actual_close{fold_num}.png")
+
         logger.info(f"Completed Fold {fold_num}\n")
 
         save_predictions_csv(all_preds, all_actuals)
@@ -1124,12 +1332,12 @@ def main():
             logger.info(f"{feat:<15}: {imp*1000:.6f} (scaled x1000)")
 
         # Total_report
-        plot_interpretability_report(
-            model=model, 
-            val_loader=val_loader, 
-            mkt_cols=mkt_cols,
-            sent_cols=sent_cols,
-            fold=fold_num)
+        # plot_interpretability_report(
+        #     model=model, 
+        #     val_loader=val_loader, 
+        #     mkt_cols=mkt_cols,
+        #     sent_cols=sent_cols,
+        #     fold=fold_num)
         
         plot_feature_time_heatmap(model, val_loader, feature_names=feature_names, filename=f"{output_folder}/fold_{fold_num}_saliency_heatmap.png")
 
