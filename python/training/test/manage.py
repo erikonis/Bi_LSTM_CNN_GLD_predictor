@@ -9,7 +9,7 @@ import torch
 from settings import output_dir, has_cuda
 
 from loss import LOSS_FACTORY
-from utils import preprocessing
+from training.utils.utils import preprocessing
 from dataloader import StockPriceDataset
 from model import CnnLSTM
 

@@ -2,8 +2,8 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
-from Constants import ColNames
-import dataset_former
+from training.Constants import ColNames
+import training.dataset_former as dataset_former
 
 def plot_correlation_matrix(df, title="Feature Correlation Matrix"):
     """
@@ -35,13 +35,27 @@ def plot_correlation_matrix(df, title="Feature Correlation Matrix"):
     plt.savefig("correlation_matrix.png")
     plt.show()
 
+def plot_close_price(df, title="Close Price Over Time"):
+    """
+    Plots the close price over time.
+    """
+    plt.figure(figsize=(12, 6))
+    plt.plot(df[ColNames.DATE], df[ColNames.CLOSE], label='Close Price', color='blue')
+    plt.title(title)
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("close_price_over_time.png")
+    plt.show()
+
 
 if __name__ == "__main__":
     dataset = dataset_former.MarketDataset2.load()
 
-    a, b, c = dataset.get_active_cols()
-    final = a + b
-    #noo = [ColNames.MACD_SIG_NORM, ColNames.RSI_NORM, ColNames.SMA_20_NORM, ColNames.SMA_50_NORM]
-    #final = [f for f in final if f not in noo]
+    # a, b, c = dataset.get_active_cols()
+    # final = a + b
+    # #noo = [ColNames.MACD_SIG_NORM, ColNames.RSI_NORM, ColNames.SMA_20_NORM, ColNames.SMA_50_NORM]
+    # #final = [f for f in final if f not in noo]
 
-    plot_correlation_matrix(dataset.dataframe[final])
+    plot_close_price(dataset.dataframe)

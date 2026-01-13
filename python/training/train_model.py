@@ -9,9 +9,8 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from Constants import ColNames
-import dataset_former
-import tensorflow as tf
+from training.Constants import ColNames
+import training.dataset_former as dataset_former
 from datetime import datetime
 
 from abc import ABC, abstractmethod
@@ -20,7 +19,7 @@ import logging
 
 
 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-output_folder = f"results/{timestamp}"
+output_folder = f"./results/{timestamp}"
 os.makedirs(output_folder, exist_ok=True)
 
 
@@ -1289,8 +1288,6 @@ def main():
     fold_num = 0
     for train_loader, val_loader, test_loader, test_year in dataset.get_loaders(training_setting="expanding_window", batch_size=batch_size):
         fold_num += 1
-        if fold_num < 5:
-            continue
 
         logger.info(f"\n\n ==============> Starting Fold {fold_num} | Test Year: {test_year}")
         
@@ -1305,7 +1302,6 @@ def main():
             weights[name].extend(fold_weights[name])
 
 
-        #TODO
         # Evaluate on Test Set
         all_preds, all_actuals, performance, all_real_prices = evaluate_test_set(model, test_loader,  logger=logger,  dataset_denorm_fn=dataset.unnormalize_price, filename=f"{output_folder}/performance_summary{fold_num}.png")
         
@@ -1330,15 +1326,6 @@ def main():
         for feat, imp in sorted_imp:
             # We multiply by 1000 to make the small log-return errors easier to read
             logger.info(f"{feat:<15}: {imp*1000:.6f} (scaled x1000)")
-
-        # Total_report
-        # plot_interpretability_report(
-        #     model=model, 
-        #     val_loader=val_loader, 
-        #     mkt_cols=mkt_cols,
-        #     sent_cols=sent_cols,
-        #     fold=fold_num)
-        
         plot_feature_time_heatmap(model, val_loader, feature_names=feature_names, filename=f"{output_folder}/fold_{fold_num}_saliency_heatmap.png")
 
     # After folding
