@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, asdict
 import numpy as np
 import pandas as pd
 import logging
+from src.utils.MetaConstants import MetaKeys
 import torch.nn as nn
 import torch
 
@@ -688,26 +689,26 @@ def main(
     )
 
     current_hyperparams = {
-        "hidden_dim": hidden_dim,
-        "batch_size": batch_size,
-        "epochs": epochs,
-        "learning_rate": learning_rate,
-        "early_stop": early_stop,
-        "auto_feature_engineering": auto_feat_engineering,
-        "feature_threshold": feature_threshold,
-        "dropout_rate": dropout_rate,
-        "early_stop_patience": 10 if early_stop else None,
-        "data_split": data_split,
-        "targets": targets,
-        "mkt_cols": mkt_cols,
-        "sent_cols": sent_cols,
+        MetaKeys.HIDDEN_DIM: hidden_dim,
+        MetaKeys.BATCH_SIZE: batch_size,
+        MetaKeys.EPOCHS: epochs,
+        MetaKeys.LEARNING_RATE: learning_rate,
+        MetaKeys.EARLY_STOP: early_stop,
+        MetaKeys.AUTO_FEATURE_ENGINEERING: auto_feat_engineering,
+        MetaKeys.FEATURE_THRESHOLD: feature_threshold,
+        MetaKeys.DROPOUT: dropout_rate,
+        MetaKeys.EARLY_STOP_PATIENCE: 10 if early_stop else None,
+        MetaKeys.DATA_SPLIT: data_split,
+        MetaKeys.TARGETS: targets,
+        MetaKeys.MKT_COLS: mkt_cols,
+        MetaKeys.SENT_COLS: sent_cols,
     }
 
     dataset_details = {
-        "dataset_architecture": dataset.__class__.__name__,
-        "ticker": ticker,
-        "num_samples": len(dataset),
-        "date_range": (str(dataset.start_date), str(dataset.end_date)),
+        MetaKeys.ARCH: dataset.__class__.__name__,
+        MetaKeys.TICKER: ticker,
+        MetaKeys.NUM_SAMPLES: len(dataset),
+        MetaKeys.DATE_RANGE: (str(dataset.start_date), str(dataset.end_date)),
     }
 
     model.save(

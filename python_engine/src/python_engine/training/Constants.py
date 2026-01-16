@@ -81,6 +81,12 @@ class ColNames:
 class Training:
     DATASPLIT_EXPAND = "expanding_window"
     DATASPLIT_SLIDE = "sliding_window"
-    BILSTM_CNN = "predictorbilstmcnn"
-    BILSTM_CNN_A = "predictorbilstmcnna"
-    MODELS = [BILSTM_CNN, BILSTM_CNN_A]
+
+class ModelConst:
+    MODEL_STATE_DICT = "model_state_dict"
+    OPTIMIZER_STATE_DICT = "optimizer_state_dict"
+    INFORMATION = "information"
+    PERFORMANCE = "performance"
+    HYPERPARAMS = "hyperparams"
+    DATASET_DETAILS = "dataset_details"
+    TIMESTAMP = "timestamp"

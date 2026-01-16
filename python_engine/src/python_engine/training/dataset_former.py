@@ -20,9 +20,8 @@ import pandas as pd
 import pandas_ta as ta  # For technical indicators
 import json, os
 import dtale
-from overrides import overrides
-from python_engine.training.Constants import ColNames
-from datetime import datetime
+from src.python_engine.training.Constants import ColNames
+from src.utils.paths import get_dataset_dir
 
 # Payload keys used for saving/loading the dataset payload. Centralized
 # to avoid hard-to-find string mismatches when editing save/load.
@@ -52,6 +51,7 @@ PAY_LATEST_DATE = "latest_date"
 class MarketDataset(Dataset):
     def __init__(
         self,
+        ticker: str,
         data_df: pd.DataFrame,
         market_cols=ColNames.MARKET_COLS,
         sent_cols=ColNames.SENTIMENT_COLS,
@@ -74,6 +74,7 @@ class MarketDataset(Dataset):
 
         if not null:
             self.dataframe = data_df.sort_index()
+            self.ticker = ticker.upper()
 
             # Original price
             if ColNames.VOLUME in market_cols and ColNames.VOLUME not in target_cols:
@@ -121,6 +122,7 @@ class MarketDataset(Dataset):
             ).date()
 
         else:
+            self.ticker = None
             self.dataframe = None
             self.raw_OHLCV = None
             self.seq_len = None
@@ -190,6 +192,12 @@ class MarketDataset(Dataset):
             real_price,
         )
 
+    def get_last_days(self, days:int):
+        """Get last `days` days of the whole dataframe."""
+        if days <= 0:
+            raise ValueError("Days must be a positive integer.")
+        return self.dataframe.iloc[-days:]
+
     def set_new_state(
         self,
         raw_ohlcv_cols: list,
@@ -214,8 +222,10 @@ class MarketDataset(Dataset):
         lookback_window: int,
         valid_indices: int,
         ohlc_multiplier: int,
+        ticker: str,
     ):
         # Original price
+        self.ticker = ticker.upper()
         self.dataframe = dataframe
         self.raw_OHLCV = raw_ohlcv
 
@@ -457,7 +467,7 @@ class MarketDataset(Dataset):
                     new_market.append(ColNames.MACD_SIG_NORM)
                     old_market.append(ColNames.MACD_SIG)
                 case ColNames.ATR:
-                    pass
+                    df[ColNames.ATR_NORM] = df[ColNames.ATR]
                 case ColNames.SMA_20:
                     df[ColNames.SMA_20_NORM] = (df[ColNames.SMA_20] - 1) * 10
                     new_market.append(ColNames.SMA_20_NORM)
@@ -532,7 +542,9 @@ class MarketDataset(Dataset):
         self._normalized_cols.extend(new_market + new_sent + new_target)
 
     def dropna(self):
+        print(self.dataframe.head())
         self.dataframe = self.dataframe.dropna()
+        print(self.dataframe.head())
         self.raw_OHLCV = self.dataframe[self._price_cols]
         self.years = self.dataframe[ColNames.YEAR]
         self._market_data = self.dataframe[self._market_cols].values.astype(np.float32)
@@ -552,7 +564,7 @@ class MarketDataset(Dataset):
         Returns:
             pd.Series | np.ndarray: Normalized values (log returns scaled).
         """
-        return np.log(price / last_close) * self.ohlc_multiplier
+        return normalize_price(price, last_close, self.ohlc_multiplier)
 
     def unnormalize_price(self, value, last_close):
         """Invert `normalize_price` and return original-scale prices.
@@ -986,7 +998,7 @@ class MarketDataset(Dataset):
                     print("Unknown option")
         return cols
 
-    def save(self, folder_path="./python_engine/training/saved_dataset") -> None:
+    def save(self, ticker=None, folder_path=None) -> None:
         """Serialize/save the MarketDataset object to disk.
 
         Parameters:
@@ -1005,10 +1017,15 @@ class MarketDataset(Dataset):
             None
         """
 
-        os.makedirs(folder_path, exist_ok=True)
+        if ticker is None:
+            ticker = self.ticker.upper()
+
+        if folder_path is None:
+            folder_path = get_dataset_dir(ticker)
 
         # Save Numerical Data as binary
         payload = {
+            "ticker": self.ticker,
             PAY_TARGET_DATA: torch.from_numpy(self._target_data),
             PAY_MARKET_DATA: torch.from_numpy(self._market_data),
             PAY_SENTIMENT_DATA: torch.from_numpy(self._sentiment_data),
@@ -1042,7 +1059,7 @@ class MarketDataset(Dataset):
         print(f"Raw OHLCV dataset successfully saved to {folder_path}")
 
     @classmethod
-    def load(cls, folder_path="./python_engine/training/saved_dataset"):
+    def load(cls, ticker, folder_path=None):
         """Deserialize/load: Reconstruct the object from saved artifacts.
 
         Parameters:
@@ -1056,11 +1073,17 @@ class MarketDataset(Dataset):
             FileNotFoundError: If expected files are missing from `folder_path`.
         """
 
+        ticker = ticker.upper()
+
+        if folder_path is None:
+            folder_path = get_dataset_dir(ticker)
+
         payload = torch.load(
             os.path.join(folder_path, "tensors.pt"), weights_only=False
         )
 
         instance = cls(
+            ticker,
             None,
             market_cols=[],
             sent_cols=[],
@@ -1070,6 +1093,7 @@ class MarketDataset(Dataset):
         )
 
         instance.set_new_state(
+            ticker=ticker,
             raw_ohlcv_cols=payload.get(RAW_COLS),
             close_col=payload[CLOSE_COL],
             market_cols=payload.get(PAY_MARKET_COLS),
@@ -1101,6 +1125,7 @@ class MarketDataset(Dataset):
         cls,
         csv_path: str,
         json_path: str,
+        ticker: str,
         market_cols=ColNames.MARKET_COLS,
         sent_cols=ColNames.SENTIMENT_COLS,
         tgt_cols=[ColNames.OPEN, ColNames.HIGH, ColNames.LOW, ColNames.CLOSE],
@@ -1112,6 +1137,7 @@ class MarketDataset(Dataset):
         Parameters:
             csv_path (str): Path to the market CSV file.
             json_path (str): Path to the sentiment JSON file (JSON dict date -> [score,count]).
+            ticker (str): Ticker symbol for the asset.
             market_cols (list[str]): Names of CSV columns to map to standard OHLCV.
             sent_cols (list[str]): Names of sentiment columns expected.
             tgt_cols (list[str]): Source columns to derive targets from.
@@ -1126,6 +1152,7 @@ class MarketDataset(Dataset):
         # Create Dataset
         dataset = cls(
             df,
+            ticker = ticker, 
             market_cols=market_cols,
             sent_cols=sent_cols,
             target_cols=tgt_cols,
@@ -1279,7 +1306,246 @@ class MarketDataset(Dataset):
         df = MarketDataset.load_data(csv_path, json_path, market_cols, market_new_cols)
         self.add_data(df)
 
+    def form_infere_sample(self, open, close, high, low, volume, sentiment, sentiment_vol, mkt_cols, sent_cols, window=30, lookback=134) -> pd.DataFrame:
+        """
+        Forms a single inference sample as a pandas DataFrame row.
+
+        Parameters:
+            open (float): Opening price.
+            close (float): Closing price.
+            high (float): Highest price.
+            low (float): Lowest price.
+            volume (float): Trading volume.
+            sentiment (float): Sentiment score.
+            sentiment_vol (int): Number of sentiment articles.
+        Returns:
+            pandas.DataFrame: A single-row DataFrame with the provided data.
+        """
+        data = {
+            ColNames.OPEN: [open],
+            ColNames.CLOSE: [close],
+            ColNames.HIGH: [high],
+            ColNames.LOW: [low],
+            ColNames.VOLUME: [volume],
+            ColNames.SENTIMENT: [sentiment],
+            ColNames.SENTIMENT_VOL: [sentiment_vol],
+        }
+        df = pd.DataFrame(data)
+
+        context_df = self.dataframe[self._original_cols_m + self._original_cols_s].tail(lookback)
+        df = pd.concat([context_df, df], ignore_index=True)
+        df = apply_technicals(df)
+        df = normalize(df)
+        sample = df.tail(1)
+        window_context = self.dataframe.tail(29)
+        final = pd.concat([window_context, sample])
+        mkt = final[mkt_cols]
+        snt = final[sent_cols]
+        mkt_data = mkt.values.astype(np.float32)
+        snt_data = snt.values.astype(np.float32)
+
+        return mkt_data, snt_data
+    
+def apply_technicals(
+        df,
+        technicals: list = [
+            ColNames.RSI,
+            ColNames.SMA_20,
+            ColNames.SMA_50,
+            ColNames.MACD,
+            ColNames.MACD_SIG,
+            ColNames.ATR,
+            ColNames.BB_LOWER,
+            ColNames.BB_UPPER,
+        ],
+    ):
+        """Compute and append technical indicator columns to the DataFrame.
+
+        Parameters:
+            technicals (list[str]): List of indicator keys to compute (see `ColNames`).
+
+        Returns:
+            None: Modifies `df`.
+        """
+        performed = set()
+        for tec in technicals:
+            if tec in performed:
+                pass
+            try:
+                match tec:
+                    case ColNames.RSI:
+                        df[ColNames.RSI] = ta.rsi(df[ColNames.CLOSE], length=14)
+                    case ColNames.SMA_20:
+                        df[ColNames.SMA_20] = df[ColNames.CLOSE] / ta.sma(
+                            df[ColNames.CLOSE], length=20
+                        )
+                    case ColNames.SMA_50:
+                        df[ColNames.SMA_50] = df[ColNames.CLOSE] / ta.sma(
+                            df[ColNames.CLOSE], length=50
+                        )
+                    case ColNames.MACD:
+                        macd = ta.macd(df[ColNames.CLOSE])
+                        df[ColNames.MACD] = macd["MACD_12_26_9"]
+                    case ColNames.MACD_SIG:
+                        macd = ta.macd(df[ColNames.CLOSE])
+                        df[ColNames.MACD_SIG] = macd["MACDs_12_26_9"]
+                    case ColNames.ATR:
+                        df[ColNames.ATR] = ta.atr(
+                            df[ColNames.HIGH],
+                            df[ColNames.LOW],
+                            df[ColNames.CLOSE],
+                            length=14,
+                        )
+                    case ColNames.BB_LOWER:
+                        bbands = ta.bbands(df[ColNames.CLOSE], length=20, std=2)
+                        df[ColNames.BB_LOWER] = bbands.iloc[:, 0] / df[ColNames.CLOSE]
+                    case ColNames.BB_UPPER:
+                        bbands = ta.bbands(df[ColNames.CLOSE], length=20, std=2)
+                        df[ColNames.BB_UPPER] = bbands.iloc[:, 2] / df[ColNames.CLOSE]
+                    case _:
+                        print(
+                            f"Not implemented or Incorrect Key passed ({tec}). Skipping."
+                        )
+            except KeyError as e:
+                raise KeyError(
+                    f"The required column to calculate the technical was not found. Read below: \n{repr(e)}"
+                )
+            performed.add(tec)
+        return df
+            
+def normalize(df, features: list = None, window: int = 90):
+        """Normalize selected features and add normalized columns to the DataFrame.
+
+        Parameters:
+            features (list[str] | None): List of features to normalize. If None,
+                normalizes all current market, sentiment and target columns.
+            window (int): Rolling window size used for Z-score normalizations.
+
+        Returns:
+            None: Modifies `self.dataframe` in-place and updates the active
+            column lists and `self._normalized_cols`.
+        """
+        if features is None:
+            features = df.columns.tolist()
+
+
+        prev_close = df[ColNames.CLOSE].shift(1)
+        curr_close = df[ColNames.CLOSE]
+
+        for feat in features:
+            match feat:
+                case ColNames.OPEN:
+                    df[ColNames.OPEN_NORM] = normalize_price(
+                        df[ColNames.OPEN], prev_close
+                    )
+                case ColNames.HIGH:
+                    df[ColNames.HIGH_NORM] = normalize_price(
+                        df[ColNames.HIGH], prev_close
+                    )
+                case ColNames.LOW:
+                    df[ColNames.LOW_NORM] = normalize_price(
+                        df[ColNames.LOW], prev_close
+                    )
+                case ColNames.CLOSE:
+                    df[ColNames.CLOSE_NORM] = normalize_price(
+                        df[ColNames.CLOSE], prev_close
+                    )
+                case ColNames.VOLUME:
+                    df[ColNames.VOLUME_NORM] = np.log(
+                        df[ColNames.VOLUME] / df[ColNames.VOLUME].shift(1)
+                    )
+                case ColNames.RSI:
+                    df[ColNames.RSI_NORM] = (
+                        df[ColNames.RSI] - df[ColNames.RSI].rolling(window).mean()
+                    ) / (df[ColNames.RSI].rolling(window).std() + 1e-6)
+                case ColNames.MACD:
+                    df[ColNames.MACD_NORM] = (
+                        df[ColNames.MACD] - df[ColNames.MACD].rolling(window).mean()
+                    ) / (df[ColNames.MACD].rolling(window).std() + 1e-6)
+                case ColNames.MACD_SIG:
+                    df[ColNames.MACD_SIG_NORM] = (
+                        df[ColNames.MACD_SIG]
+                        - df[ColNames.MACD_SIG].rolling(window).mean()
+                    ) / (df[ColNames.MACD_SIG].rolling(window).std() + 1e-6)
+                case ColNames.ATR:
+                    df[ColNames.ATR_NORM] = df[ColNames.ATR]
+                case ColNames.SMA_20:
+                    df[ColNames.SMA_20_NORM] = (df[ColNames.SMA_20] - 1) * 10
+                case ColNames.SMA_50:
+                    df[ColNames.SMA_50_NORM] = (df[ColNames.SMA_50] - 1) * 10
+                case ColNames.BB_LOWER:
+                    df[ColNames.BB_LOWER_NORM] = (df[ColNames.BB_LOWER] - 1) * 10
+                case ColNames.BB_UPPER:
+                    df[ColNames.BB_UPPER_NORM] = (df[ColNames.BB_UPPER] - 1) * 10
+                case ColNames.SENTIMENT:
+                    pass
+                case ColNames.SENTIMENT_VOL:
+                    news_log = np.log1p(df[ColNames.SENTIMENT_VOL])
+
+                    rolling_mean = news_log.rolling(window=90, min_periods=1).mean()
+                    rolling_std = news_log.rolling(window=90, min_periods=1).std(ddof=0)
+
+                    expanding_mean = news_log.expanding(min_periods=2).mean()
+                    expanding_std = news_log.expanding(min_periods=2).std(ddof=0)
+
+                    # Fill the "Cold Start" gaps with the growing history
+                    final_mean = rolling_mean.fillna(expanding_mean)
+                    final_std = rolling_std.fillna(expanding_std)
+
+                    df[ColNames.SENTIMENT_VOL_NORM] = (news_log - final_mean) / (
+                        final_std + 1e-6
+                    )
+                case ColNames.TARGET_O:
+                    # for targets current close serves as their previous.
+                    df[ColNames.TARGET_O_NORM] = normalize_price(
+                        df[ColNames.TARGET_O], curr_close
+                    )
+                case ColNames.TARGET_H:
+                    df[ColNames.TARGET_H_NORM] = normalize_price(
+                        df[ColNames.TARGET_H], curr_close
+                    )
+                case ColNames.TARGET_L:
+                    df[ColNames.TARGET_L_NORM] = normalize_price(
+                        df[ColNames.TARGET_L], curr_close
+                    )
+                case ColNames.TARGET_C:
+                    df[ColNames.TARGET_C_NORM] = normalize_price(
+                        df[ColNames.TARGET_C], curr_close
+                    )
+                case _:
+                    raise NotImplementedError(
+                        f"Something Unexpected happened. There is no implementation to normalize such feature ({feat})."
+                    )
+                
+        return df
+
+def normalize_price(price, last_close, multiplier=100):
+        """Vectorized log-return normalization for price columns.
+
+        Parameters:
+            price (pd.Series | np.ndarray): Prices to normalize.
+            last_close (pd.Series | np.ndarray): Reference previous-close prices.
+
+        Returns:
+            pd.Series | np.ndarray: Normalized values (log returns scaled).
+        """
+        return np.log(price / last_close) * multiplier
+
+def unnormalize_price(value, last_close, multiplier=100):
+    """Invert `normalize_price` and return original-scale prices.
+
+    Parameters:
+        value (pd.Series | np.ndarray): Normalized value(s) to invert.
+        last_close (pd.Series | np.ndarray): Reference price(s) used when
+            the value was originally normalized.
+
+    Returns:
+        pd.Series | np.ndarray: Reconstructed price values.
+    """
+    return np.exp(value / multiplier) * last_close
 
 if __name__ == "__main__":
-    dataset = MarketDataset.load()
-    dataset.show_dataframe_interactive(options=["all"])
+    dataset = MarketDataset.load("GLD")
+    # dataset.show_dataframe_interactive(options=["all"])
+    print(dataset.form_infere_sample(180.0, 185.0, 190.0, 175.0, 1500000.0, 0.5, 10,
+                               dataset._market_cols, dataset._sent_cols))

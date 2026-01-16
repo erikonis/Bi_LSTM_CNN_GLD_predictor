@@ -2,7 +2,8 @@ import json
 import os
 import shutil
 
-from src.utils.paths import CONFIG_TICKERS_PATH, get_model_dir, QUARANTINE_DIR
+from src.utils.paths import CONFIG_TICKERS_PATH, get_model_dir, QUARANTINE_DIR, quarantine_name
+from src.utils.MetaConstants import MetaKeys, ConfigKeys, UNKNOWN
 
 def update_available_models(model_name, ticker, timestamp, date_range):
     """Updates the config/tickers.json file with the latest trained model info."""
@@ -11,19 +12,18 @@ def update_available_models(model_name, ticker, timestamp, date_range):
             try:
                 tickers_config = json.load(f)
             except json.JSONDecodeError:
-                tickers_config = {"available_tickers": [], "models": {}}
+                tickers_config = {ConfigKeys.AVAILABLE_TICKERS: [], ConfigKeys.MODELS: {}}
     else:
-        tickers_config = {"available_tickers": [], "models": {}}
+        tickers_config = {ConfigKeys.AVAILABLE_TICKERS: [], ConfigKeys.MODELS: {}}
 
-    tickers_config["models"][model_name] = {
-        "ticker": ticker,
-        "trained": timestamp,
-        "date_range" : date_range
+    tickers_config[ConfigKeys.MODELS][model_name] = {
+        ConfigKeys.TICKER: ticker,
+        ConfigKeys.TRAINED_AT: timestamp,
+        ConfigKeys.DATE_RANGE : date_range
     }
 
-    if ticker not in tickers_config["available_tickers"]:
-        tickers_config["available_tickers"].append(ticker)
-
+    if ticker not in tickers_config[ConfigKeys.AVAILABLE_TICKERS]:
+        tickers_config[ConfigKeys.AVAILABLE_TICKERS].append(ticker)
     with open(CONFIG_TICKERS_PATH, "w") as f:
         json.dump(tickers_config, f, indent=4)
 
@@ -37,33 +37,33 @@ def sync_available_models():
 
     available_models = {}
     for ticker in os.listdir(models_root):
-        if ticker == "quarantine":
+        if ticker == quarantine_name:
             continue
         ticker_dir = models_root / ticker
         if ticker_dir.is_dir():
             for model_name in os.listdir(ticker_dir):
                 model_dir = ticker_dir / model_name
                 if model_dir.is_dir():
-                    metadata_path = model_dir / "metadata.json"
+                    metadata_path = model_dir / MetaKeys.METADATA_FILE
                     if metadata_path.exists():
                         with open(metadata_path, "r", encoding="utf-8") as f:
                             try:
                                 metadata = json.load(f)
-                                details = metadata.get("model_details", {})
+                                details = metadata.get(MetaKeys.MODEL_DETAILS, {})
                                 
                                 if not details:
-                                    print(f"Warning: {metadata_path} has no 'model_details'. Skipping.")
+                                    print(f"Warning: {metadata_path} has no '{MetaKeys.MODEL_DETAILS}'. Skipping.")
                                     print(f"Moving broken model {model_name} to quarantine...")
                                     shutil.move(str(model_dir), str(QUARANTINE_DIR / f"{ticker}_{model_name}"))
                                     continue
 
-                                trained = details.get("created_at", "UNKNOWN")
-                                date_range = details.get("date_range", "UNKNOWN")
+                                trained = details.get(MetaKeys.CREATED_AT, UNKNOWN)
+                                date_range = details.get(MetaKeys.DATE_RANGE, UNKNOWN)
                                 
                                 available_models[model_name] = {
-                                    "ticker": ticker,
-                                    "trained": trained,
-                                    "date_range": date_range
+                                    ConfigKeys.TICKER: ticker,
+                                    ConfigKeys.TRAINED_AT: trained,
+                                    ConfigKeys.DATE_RANGE: date_range
                                 }
                             except json.JSONDecodeError:
                                 print(f"Error: {metadata_path} is empty or corrupted. Skipping.")
@@ -80,14 +80,14 @@ def sync_available_models():
             try:
                 tickers_config = json.load(f)
             except json.JSONDecodeError:
-                tickers_config = {"available_tickers": [], "models": {}}
+                tickers_config = {ConfigKeys.AVAILABLE_TICKERS: [], ConfigKeys.MODELS: {}}
     else:
-        tickers_config = {"available_tickers": [], "models": {}}
+        tickers_config = {ConfigKeys.AVAILABLE_TICKERS: [], ConfigKeys.MODELS: {}}
 
-    tickers_config["models"] = available_models
-    tickers_config["available_tickers"] = list(
-        set(tickers_config.get("available_tickers", [])).union(
-            {info["ticker"] for info in available_models.values()}
+    tickers_config[ConfigKeys.MODELS] = available_models
+    tickers_config[ConfigKeys.AVAILABLE_TICKERS] = list(
+        set(tickers_config.get(ConfigKeys.AVAILABLE_TICKERS, [])).union(
+            {info[ConfigKeys.TICKER] for info in available_models.values()}
         )
     )
 
@@ -120,12 +120,12 @@ def delete_model(model_name):
             try:
                 tickers_config = json.load(f)
             except json.JSONDecodeError:
-                tickers_config = {"available_tickers": [], "models": {}}
+                tickers_config = {ConfigKeys.AVAILABLE_TICKERS: [], ConfigKeys.MODELS: {}}
     else:
-        tickers_config = {"available_tickers": [], "models": {}}
+        tickers_config = {ConfigKeys.AVAILABLE_TICKERS: [], ConfigKeys.MODELS: {}}
 
-    if model_name in tickers_config["models"]:
-        del tickers_config["models"][model_name]
+    if model_name in tickers_config[ConfigKeys.MODELS]:
+        del tickers_config[ConfigKeys.MODELS][model_name]
 
     with open(CONFIG_TICKERS_PATH, "w") as f:
         json.dump(tickers_config, f, indent=4)
@@ -139,30 +139,30 @@ def generate_metadata(
     Creates a JSON file with model architecture, training params, and performance.
     """
     metadata = {
-        "model_details": {
-            "architecture": model.__class__.__name__,
-            "model_name": model_name,
-            "information": information,
-            "mkt_feat_dim": getattr(model, "mkt_feat_dim", "unknown"),
-            "sent_feat_dim": getattr(model, "sent_feat_dim", "unknown"),
-            "hidden_dim": getattr(model, "hidden_dim", "unknown"),
-            "target_dim": getattr(model, "target_dim", "unknown"),
-            "created_at": timestamp,
+        MetaKeys.MODEL_DETAILS: {
+            MetaKeys.ARCH: model.__class__.__name__,
+            MetaKeys.NAME: model_name,
+            MetaKeys.INFORMATION: information,
+            MetaKeys.MKT_DIM: getattr(model, "mkt_feat_dim", UNKNOWN),
+            MetaKeys.SENT_DIM: getattr(model, "sent_feat_dim", UNKNOWN),
+            MetaKeys.HIDDEN_DIM: getattr(model, "hidden_dim", UNKNOWN),
+            MetaKeys.TARGET_DIM: getattr(model, "target_dim", UNKNOWN),
+            MetaKeys.CREATED_AT: timestamp,
         },
-        "hyperparameters": hyperparams,
-        "performance_metrics": {
+        MetaKeys.HYPERPARAMS: hyperparams,
+        MetaKeys.PERFORMANCE: {
             # Convert numpy floats to standard python floats so JSON can save them
-            "rmse": float(performance.get("rmse", 0)),
-            "directional_accuracy": float(performance.get("directional_accuracy", 0)),
-            "epsilon_accuracy": float(performance.get("epsilon_accuracy", 0)),
-            "mae": float(performance.get("mae", 0)),
-            "mape": float(performance.get("mape", 0)),
+            MetaKeys.RMSE: float(performance.get(MetaKeys.RMSE, 0)),
+            MetaKeys.ACCURACY: float(performance.get(MetaKeys.ACCURACY, 0)),
+            MetaKeys.EPSILON_ACCURACY: float(performance.get(MetaKeys.EPSILON_ACCURACY, 0)),
+            MetaKeys.MAE: float(performance.get(MetaKeys.MAE, 0)),
+            MetaKeys.MAPE: float(performance.get(MetaKeys.MAPE, 0)),
         },
-        "dataset_details": dataset_details,
-        "optimizer": {
-            "type": optimizer.__class__.__name__,
-            "lr": optimizer.param_groups[0]["lr"],
-            "weight_decay": optimizer.param_groups[0].get("weight_decay", 0),
+        MetaKeys.DATASET: dataset_details,
+        MetaKeys.OPTIMIZER: {
+            MetaKeys.TYPE: optimizer.__class__.__name__,
+            MetaKeys.LEARNING_RATE: optimizer.param_groups[0]["lr"],
+            MetaKeys.WEIGHT_DECAY: optimizer.param_groups[0].get("weight_decay", 0),
         },
     }
 
@@ -177,7 +177,7 @@ def get_available_tickers():
         with open(CONFIG_TICKERS_PATH, "r") as f:
             try:
                 tickers_config = json.load(f)
-                return tickers_config.get("available_tickers", [])
+                return tickers_config.get(ConfigKeys.AVAILABLE_TICKERS, [])
             except json.JSONDecodeError:
                 return []
     return []

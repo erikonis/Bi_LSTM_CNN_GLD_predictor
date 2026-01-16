@@ -1,3 +1,5 @@
+from src.python_engine.training.Constants import ModelConst
+from src.utils.MetaConstants import UNKNOWN, MetaKeys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +10,6 @@ from src.utils.data_management import (
     generate_metadata,
     update_available_models,
 )
-from src.python_engine.training.Constants import Training
 
 class LogOHLCLoss(nn.Module):
     def __init__(self, penalty_weight=0.5):
@@ -55,7 +56,7 @@ class Attention(nn.Module):
 
 
 class EarlyStopping:
-    def __init__(self, patience=15, min_delta=0.0001):
+    def __init__(self, patience=10, min_delta=0.0001):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
@@ -95,18 +96,18 @@ class PredictorSkeleton(ABC, nn.Module):
         """Saves the model state and training context + JSON metadata."""
         timestamp = datetime.now().isoformat()
         state = {
-            "information": information,
-            "model_state_dict": self.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "performance": performance,
-            "hyperparams": hyperparams,
-            "dataset_details": dataset_details,
-            "timestamp": timestamp,
+            ModelConst.INFORMATION: information,
+            ModelConst.MODEL_STATE_DICT: self.state_dict(),
+            ModelConst.OPTIMIZER_STATE_DICT: optimizer.state_dict(),
+            ModelConst.PERFORMANCE: sanitize_dict(performance),
+            ModelConst.HYPERPARAMS: sanitize_dict(hyperparams),
+            ModelConst.DATASET_DETAILS: sanitize_dict(dataset_details),
+            ModelConst.TIMESTAMP: timestamp,
         }
         torch.save(state, path)
 
         # Define the json path (e.g., model.pth -> model_metadata.json)
-        json_path = os.path.dirname(path) + "/metadata.json"
+        json_path = os.path.dirname(path) + f"/{MetaKeys.METADATA_FILE}"
 
         # Call our new metadata function
         generate_metadata(
@@ -123,9 +124,9 @@ class PredictorSkeleton(ABC, nn.Module):
 
         update_available_models(
             model_name,
-            dataset_details.get("ticker", "UNKNOWN"),
+            dataset_details.get(MetaKeys.TICKER, UNKNOWN),
             timestamp,
-            dataset_details.get("date_range", "UNKNOWN"),
+            dataset_details.get(MetaKeys.DATE_RANGE, UNKNOWN),
         )
 
         print(f"Model and Metadata saved to {os.path.dirname(path)}")
@@ -136,14 +137,30 @@ class PredictorSkeleton(ABC, nn.Module):
             return None
 
         checkpoint = torch.load(path)
-        self.load_state_dict(checkpoint["model_state_dict"])
+        self.load_state_dict(checkpoint[ModelConst.MODEL_STATE_DICT])
 
         if optimizer:
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            optimizer.load_state_dict(checkpoint[ModelConst.OPTIMIZER_STATE_DICT])
 
-        print(f"Model loaded from Fold {checkpoint.get('fold', 'Unknown')}")
+        print(f"Model loaded from Fold {checkpoint.get('fold', UNKNOWN)}")
         return checkpoint.get("fold", 0)
 
+def sanitize_dict(d):
+    """Recursively convert numpy types to native Python types."""
+    import numpy as np
+    new_dict = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            new_dict[k] = sanitize_dict(v)
+        elif isinstance(v, (np.float32, np.float64, np.float16)):
+            new_dict[k] = float(v)
+        elif isinstance(v, (np.int32, np.int64, np.int16)):
+            new_dict[k] = int(v)
+        elif isinstance(v, np.ndarray):
+            new_dict[k] = v.tolist()
+        else:
+            new_dict[k] = v
+    return new_dict
 
 class PredictorBiLSTMcnnA(PredictorSkeleton):
     def __init__(
@@ -282,12 +299,17 @@ class PredictorBiLSTMcnn(PredictorSkeleton):
         output = self.fc_fusion(x)
 
         return output
-    
+
+class ModelNames:
+    BILSTM_CNN = PredictorBiLSTMcnn.__name__.lower()
+    BILSTM_CNN_A = PredictorBiLSTMcnnA.__name__.lower()
+    MODELS = [BILSTM_CNN, BILSTM_CNN_A]
+
 def name_to_class(name: str):
     match name.lower():
-        case Training.BILSTM_CNN:
+        case ModelNames.BILSTM_CNN:
             return PredictorBiLSTMcnn
-        case Training.BILSTM_CNN_A:
+        case ModelNames.BILSTM_CNN_A:
             return PredictorBiLSTMcnnA
         case _:
             raise ValueError(f"Unknown model name: {name}")

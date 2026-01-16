@@ -29,7 +29,7 @@ project_root = get_project_root()
 # -- ROOT
 data_dir = root_dir / "data"
 config_dir = root_dir / "config"
-logs_dir = data_dir / "logs"
+logs_dir = root_dir / "logs"
 processed_dir = data_dir / "processed"
 raw_dir = data_dir / "raw"
 
@@ -44,10 +44,14 @@ MARKET_DATA_DIR = raw_dir / "market"
 NEWS_DATA_DIR = raw_dir / "news"
 DATASETS_DIR = processed_dir / "datasets"
 MODELS_DIR = data_dir / "models"
+quarantine_name = "quarantine"
 QUARANTINE_DIR = MODELS_DIR / "quarantine"
 
 CONFIG_TRAIN_PATH = config_dir / "train_config.yaml"
 CONFIG_TICKERS_PATH = config_dir / "tickers.json"
+LOG_PATH = logs_dir / "python_engine.log"
+LOG_COMMS_PATH = logs_dir / "comms.log"
+LOG_BRAIN_PATH = logs_dir / "python_engine.log"
 
 
 MARKET_DATA_DIR.mkdir(exist_ok=True)
