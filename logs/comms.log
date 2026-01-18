@@ -1,14 +1,11 @@
-[01/17/26 00:06:12] INFO    Java Comms System Started
-[01/17/26 00:06:13] INFO    Allocated port 50078 for Python service.
-[01/17/26 00:06:13] INFO    Allocated heartbeat port 50079 for Python service.
-[01/17/26 00:06:13] INFO    Python service started on port: 50078
-[01/17/26 00:06:13] INFO    Entering warmup phase. Waiting for Python to bind to port 50079...
-[PYTH-COMMS]  2026-01-17 00:06:17,353 - ERROR - Heartbeat timeout: No valid ping for 15s. Shutting down bridge.
-[PYTH-COMMS]  2026-01-17 00:06:27,898 - INFO - Received args: Namespace(port=50078, hport=50079)
-[PYTH-COMMS]  2026-01-17 00:06:27,899 - INFO - Starting JavaBridge...
-[PYTH-COMMS]  2026-01-17 00:06:27,901 - INFO - Heartbeat listener active on port 50079
-[PYTH-COMMS]  2026-01-17 00:06:27,903 - INFO - Command listener active on port 50078
-[01/17/26 00:06:28] INFO    Python is READY. Connection established after 15s
-[01/17/26 00:07:49] SEVERE  Final attempt failed: Non-standard token 'NaN': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow
- at [Source: (String)"{"status": "success", "predictions": [NaN]}"; line: 1, column: 42]
-[PYTH-COMMS]  2026-01-17 00:34:37,153 - INFO - JavaBridge has shut down.
+[01/17/26 22:02:04] INFO    Java Comms System Started
+[01/17/26 22:02:04] INFO    Allocated port 53397 for Python service.
+[01/17/26 22:02:04] INFO    Allocated heartbeat port 53398 for Python service.
+[01/17/26 22:02:04] INFO    Python service started on port: 53397
+[01/17/26 22:02:04] INFO    Entering warmup phase. Waiting for Python to bind to port 53398...
+[PYTH-COMMS]  2026-01-17 22:02:18,799 - INFO - Received args: Namespace(port=53397, hport=53398)
+[PYTH-COMMS]  2026-01-17 22:02:18,801 - INFO - Starting JavaBridge...
+[PYTH-COMMS]  2026-01-17 22:02:18,803 - INFO - Command listener active on port 53397
+[PYTH-COMMS]  2026-01-17 22:02:18,804 - INFO - Heartbeat listener active on port 53398
+[01/17/26 22:02:19] INFO    Python is READY. Connection established after 14s
+[PYTH-COMMS]  2026-01-18 10:41:28,811 - INFO - JavaBridge has shut down.
