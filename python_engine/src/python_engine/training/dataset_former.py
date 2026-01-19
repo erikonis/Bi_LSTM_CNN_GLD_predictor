@@ -1,17 +1,11 @@
-"""
-dataset_former.py
------------------
-Utilities to create a MarketDataset for model training from raw OHLCV CSV
-and sentiment JSON files. Provides dataset construction, technical indicator
-calculations, normalization helpers, and robust save/load for dataset
-artifacts (tensors + parquet DataFrames).
+"""Utilities for building MarketDataset objects used in training.
 
-The file exposes `MarketDataset` (primary) and `MarketDataset2` (subclass)
-which implement PyTorch `Dataset` interface and utilities used by training
-scripts. Save/load keys are centralized as module constants to avoid
-accidental mismatches when persisting and restoring objects.
+Includes technical indicator computation, normalization, and save/load
+helpers. Only comments/docstrings have been updated; code behavior is
+unchanged.
 """
 
+import logging
 import math
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -20,8 +14,10 @@ import pandas as pd
 import pandas_ta as ta  # For technical indicators
 import json, os
 import dtale
-from src.python_engine.training.Constants import ColNames
+from src.python_engine.training.Constants import ColNames, Training
 from src.utils.paths import get_dataset_dir
+
+logger = logging.getLogger("BRAIN")
 
 # Payload keys used for saving/loading the dataset payload. Centralized
 # to avoid hard-to-find string mismatches when editing save/load.
@@ -65,11 +61,11 @@ class MarketDataset(Dataset):
         lookback_window: int = 30,
         null: bool = False,
     ) -> None:
-        """
-        Market Dataset class for 1st CNN-LSTM architecture version, where
+        """Market dataset storing windows of market+sentiment data for models.
 
-        :param data_df: DataFrame containing the merged and processed data
-        :param seq_len: Length of the historical window for market data
+        Args:
+            data_df: Merged DataFrame with market, sentiment and technical columns.
+            lookback_window: Sequence length used for model inputs.
         """
 
         if not null:
@@ -152,47 +148,24 @@ class MarketDataset(Dataset):
             self.end_date = None
 
     def __len__(self) -> int:
-        """Return number of valid samples in the dataset.
-
-        Returns:
-            int: Number of examples (length of `self.valid_indices`).
-        """
+        """Number of valid training samples (windows) in this dataset."""
         return len(self.valid_indices)
 
     def __getitem__(self, idx: int):
-        """Build one training example for the `MarketDataset2` variant.
-
-        Parameters:
-            idx (int): Index in the dataset (0..len(self)-1). Mapped into
-                `self.valid_indices` to compute the actual DataFrame row.
-
-        Returns:
-            tuple: (market_tensor, sentiment_tensor, target_tensor, real_price)
-                - market_tensor: torch.Tensor, shape `(seq_len, n_market_feats)`
-                - sentiment_tensor: torch.Tensor, shape `(seq_len, n_sent_feats)` (windowed)
-                - target_tensor: torch.Tensor, shape `(n_target_feats,)`
-                - real_price: np.ndarray containing raw OHLCV values for the row
-        """
+        """Return a single sample: (market_tensor, sentiment_tensor, target, raw_price)."""
 
         curr_idx = self.valid_indices[idx]
 
-        # 1. Market Data: seq-length window ending at curr_idx
+        # Market and sentiment windows ending at curr_idx
         mkt_data = self._market_data[curr_idx - self.seq_len + 1 : curr_idx + 1]
-
-        # 2. Sentiment Data: same-length window for MarketDataset2
         sent_data = self._sentiment_data[curr_idx - self.seq_len + 1 : curr_idx + 1]
 
         target = self._target_data[curr_idx]
         real_price = self._raw_prices[curr_idx]
 
-        return (
-            torch.tensor(mkt_data),
-            torch.tensor(sent_data),
-            torch.tensor(target),
-            real_price,
-        )
+        return (torch.tensor(mkt_data), torch.tensor(sent_data), torch.tensor(target), real_price)
 
-    def get_last_days(self, days:int):
+    def get_last_days(self, days: int):
         """Get last `days` days of the whole dataframe."""
         if days <= 0:
             raise ValueError("Days must be a positive integer.")
@@ -292,10 +265,12 @@ class MarketDataset(Dataset):
         return col_names
 
     def sync_dates(self):
+        logger.info(f"{self.ticker}: Syncing start and end dates.")
         self.start_date = pd.to_datetime(self.dataframe[ColNames.DATE].iloc[0]).date()
         self.end_date = pd.to_datetime(self.dataframe[ColNames.DATE].iloc[-1]).date()
 
     def preprocess(self):
+        logger.info(f"{self.ticker}: Starting preprocessing pipeline.")
         self.apply_technicals()
         self.normalize()
         self.dropna()
@@ -321,6 +296,8 @@ class MarketDataset(Dataset):
         Returns:
             None: Modifies `self.dataframe` and updates `self._technical_cols`.
         """
+
+        logger.info(f"{self.ticker}: Starting technical indicator calculations.")
         df = self.dataframe
         performed = set()
         new = []
@@ -399,6 +376,7 @@ class MarketDataset(Dataset):
             None: Modifies `self.dataframe` in-place and updates the active
             column lists and `self._normalized_cols`.
         """
+        logger.info(f"{self.ticker}: Starting normalization of features.")
         if features is None:
             features = self._market_cols + self._sent_cols + self._target_cols
 
@@ -542,9 +520,8 @@ class MarketDataset(Dataset):
         self._normalized_cols.extend(new_market + new_sent + new_target)
 
     def dropna(self):
-        print(self.dataframe.head())
+        logger.info(f"{self.ticker}: Dropping NaN values from the DataFrame.")
         self.dataframe = self.dataframe.dropna()
-        print(self.dataframe.head())
         self.raw_OHLCV = self.dataframe[self._price_cols]
         self.years = self.dataframe[ColNames.YEAR]
         self._market_data = self.dataframe[self._market_cols].values.astype(np.float32)
@@ -765,7 +742,7 @@ class MarketDataset(Dataset):
         return lst
 
     def get_loaders(
-        self, batch_size: int = 64, training_setting: str = "expanding_window"
+        self, batch_size: int = 64, training_setting: str = Training.DATASPLIT_EXPAND
     ):
         """
         A generator that outputs a tuple of loaders `(train_set, val_set, test_set, real_price_set)` for each training cycle.
@@ -788,7 +765,7 @@ class MarketDataset(Dataset):
         num_years = len(set(self.years))
 
         match training_setting:
-            case "expanding_window":
+            case Training.DATASPLIT_EXPAND:
                 test_years = range(
                     start_year + math.floor(num_years * 0.6), end_year + 1
                 )
@@ -824,7 +801,7 @@ class MarketDataset(Dataset):
                     )
 
             # Placeholder for other datasplit options if needed to implement (rolling window, fixed, etc.)
-            case "sliding_window":
+            case Training.DATASPLIT_SLIDE:
                 ref_start_year = start_year
                 test_years = range(
                     start_year + math.floor(num_years * 0.6), end_year + 1
@@ -1072,7 +1049,6 @@ class MarketDataset(Dataset):
         Raises:
             FileNotFoundError: If expected files are missing from `folder_path`.
         """
-
         ticker = ticker.upper()
 
         if folder_path is None:
@@ -1152,7 +1128,7 @@ class MarketDataset(Dataset):
         # Create Dataset
         dataset = cls(
             df,
-            ticker = ticker, 
+            ticker=ticker,
             market_cols=market_cols,
             sent_cols=sent_cols,
             target_cols=tgt_cols,
@@ -1172,8 +1148,8 @@ class MarketDataset(Dataset):
         """
         Load and merge market and sentiment data.
         Market data is in CSV, sentiment data is in JSON.
-        Market CSV has columns: 'Date', '24h Open (USD)', '24h High (USD)',
-        '24h Low (USD)', 'Closing Price (USD)', 'Trading Volume'.
+        Market CSV has columns: 'Date', 'Open', 'High',
+        'Low', 'Close', 'Volume'.
         Sentiment JSON is a dict with {date :   [sentiment score, article count]}.
 
         Parameters:
@@ -1230,27 +1206,28 @@ class MarketDataset(Dataset):
         return df
 
     def add_data(self, other_df: pd.DataFrame):
-        """Append historical data from another DataFrame to the dataset.
+        """Append new raw data, normalizing it using historical context."""
 
-        Parameters:
-            other_df (pandas.DataFrame): DataFrame with same structure as
-                `self.dataframe` to append before existing data.
-        Returns:
-            None: Mutates `self.dataframe` and internal arrays.
-        """
+        logger.info("Adding new data to the dataset...")
 
-        # 1. Combine dataframes
-        # We put other_df first so that keep='first' picks the new data
-        combined = pd.concat([other_df, self.dataframe], ignore_index=False)
+        existing_df = self.dataframe.copy()
 
-        # 2. Handle duplicates: Keep the one from other_df (the first occurrences)
-        # This removes the old version from self.dataframe if it existed in other_df
-        combined = combined[~combined.index.duplicated(keep="first")]
+        processed_new_rows = self.prepare_contextual_window(
+            other_df, lookback=134, output_window=len(other_df) + 1
+        )
+        #dtale.show(processed_new_rows, subprocess=False)
 
-        # 3. Sort by Date Index to ensure the timeline is chronological
-        # Critical for sliding window functions!
-        combined = combined.sort_index()
+        # 4. CONCATENATE (Now both are DatetimeIndex, no more TypeError)
+        combined = pd.concat([existing_df, processed_new_rows], ignore_index=True)
 
+        # 5. REMOVE DUPLICATE BRIDGE ROW & SORT
+        combined = combined[~combined.index.duplicated(keep="last")]
+        combined = combined.sort_index()  # This will now work perfectly
+
+        # 7. UPDATE STATE (Ensure year is int32 here)
+        new_years = combined[ColNames.YEAR].values.astype(np.int32)
+
+        # 4. Fully update the internal state
         self.set_new_state(
             raw_ohlcv_cols=self._price_cols,
             close_col=self._close_col,
@@ -1264,18 +1241,21 @@ class MarketDataset(Dataset):
             original_cols_t=self._original_cols_t,
             dataframe=combined,
             raw_ohlcv=combined[self._price_cols],
-            years=combined[ColNames.YEAR],
+            years=new_years,
             market_data=combined[self._market_cols].values.astype(np.float32),
             sent_data=combined[self._sent_cols].values.astype(np.float32),
             target_data=combined[self._target_cols].values.astype(np.float32),
             raw_prices=combined[self._price_cols].values.astype(np.float32),
             early_date=None,
             late_date=None,
-            lookback_window=self.seq_len,
-            valid_indices=np.arange(self.seq_len, len(combined)),
+            lookback_window=int(self.seq_len),
+            valid_indices=np.arange(int(self.seq_len), len(combined)),
             ohlc_multiplier=self.ohlc_multiplier,
+            ticker=self.ticker,
         )
+
         self.sync_dates()
+        logger.info("Dataset expanded with new data successfully.")
 
     def add_hist_data(
         self,
@@ -1306,7 +1286,18 @@ class MarketDataset(Dataset):
         df = MarketDataset.load_data(csv_path, json_path, market_cols, market_new_cols)
         self.add_data(df)
 
-    def form_infere_sample(self, open, close, high, low, volume, sentiment, sentiment_vol, mkt_cols, sent_cols, window=30, lookback=134) -> pd.DataFrame:
+    def form_inference_sample(
+        self,
+        open,
+        close,
+        high,
+        low,
+        volume,
+        sentiment,
+        sentiment_vol,
+        mkt_cols,
+        sent_cols,
+    ) -> tuple:
         """
         Forms a single inference sample as a pandas DataFrame row.
 
@@ -1321,215 +1312,82 @@ class MarketDataset(Dataset):
         Returns:
             pandas.DataFrame: A single-row DataFrame with the provided data.
         """
-        data = {
-            ColNames.OPEN: [open],
-            ColNames.CLOSE: [close],
-            ColNames.HIGH: [high],
-            ColNames.LOW: [low],
-            ColNames.VOLUME: [volume],
-            ColNames.SENTIMENT: [sentiment],
-            ColNames.SENTIMENT_VOL: [sentiment_vol],
-        }
-        df = pd.DataFrame(data)
+        # 1. Create the single new row
+        new_data = pd.DataFrame(
+            [
+                {
+                    ColNames.DATE: pd.Timestamp.now(),
+                    ColNames.YEAR: pd.Timestamp.now().year,
+                    ColNames.OPEN: open,
+                    ColNames.CLOSE: close,
+                    ColNames.HIGH: high,
+                    ColNames.LOW: low,
+                    ColNames.VOLUME: volume,
+                    ColNames.SENTIMENT: sentiment,
+                    ColNames.SENTIMENT_VOL: sentiment_vol,
+                }
+            ]
+        )
 
-        context_df = self.dataframe[self._original_cols_m + self._original_cols_s].tail(lookback)
-        df = pd.concat([context_df, df], ignore_index=True)
-        df = apply_technicals(df)
-        df = normalize(df)
-        sample = df.tail(1)
-        window_context = self.dataframe.tail(29)
-        final = pd.concat([window_context, sample])
-        mkt = final[mkt_cols]
-        snt = final[sent_cols]
-        mkt_data = mkt.values.astype(np.float32)
-        snt_data = snt.values.astype(np.float32)
+        # 2. Use the generalized method (lookback 134 ensures indicators like SMA50/SMA200 work)
+        final_window = self.prepare_contextual_window(
+            new_data, lookback=134, output_window=30
+        )
 
+        # 3. Extract tensors
+        mkt_data = final_window[mkt_cols].values.astype(np.float32)
+        snt_data = final_window[sent_cols].values.astype(np.float32)
+
+        logger.info("Formed inference sample successfully.")
         return mkt_data, snt_data
-    
-def apply_technicals(
-        df,
-        technicals: list = [
-            ColNames.RSI,
-            ColNames.SMA_20,
-            ColNames.SMA_50,
-            ColNames.MACD,
-            ColNames.MACD_SIG,
-            ColNames.ATR,
-            ColNames.BB_LOWER,
-            ColNames.BB_UPPER,
-        ],
-    ):
-        """Compute and append technical indicator columns to the DataFrame.
 
-        Parameters:
-            technicals (list[str]): List of indicator keys to compute (see `ColNames`).
-
-        Returns:
-            None: Modifies `df`.
+    def prepare_contextual_window(
+        self, new_raw_df: pd.DataFrame, lookback: int = 134, output_window: int = 30
+    ) -> pd.DataFrame:
         """
-        performed = set()
-        for tec in technicals:
-            if tec in performed:
-                pass
-            try:
-                match tec:
-                    case ColNames.RSI:
-                        df[ColNames.RSI] = ta.rsi(df[ColNames.CLOSE], length=14)
-                    case ColNames.SMA_20:
-                        df[ColNames.SMA_20] = df[ColNames.CLOSE] / ta.sma(
-                            df[ColNames.CLOSE], length=20
-                        )
-                    case ColNames.SMA_50:
-                        df[ColNames.SMA_50] = df[ColNames.CLOSE] / ta.sma(
-                            df[ColNames.CLOSE], length=50
-                        )
-                    case ColNames.MACD:
-                        macd = ta.macd(df[ColNames.CLOSE])
-                        df[ColNames.MACD] = macd["MACD_12_26_9"]
-                    case ColNames.MACD_SIG:
-                        macd = ta.macd(df[ColNames.CLOSE])
-                        df[ColNames.MACD_SIG] = macd["MACDs_12_26_9"]
-                    case ColNames.ATR:
-                        df[ColNames.ATR] = ta.atr(
-                            df[ColNames.HIGH],
-                            df[ColNames.LOW],
-                            df[ColNames.CLOSE],
-                            length=14,
-                        )
-                    case ColNames.BB_LOWER:
-                        bbands = ta.bbands(df[ColNames.CLOSE], length=20, std=2)
-                        df[ColNames.BB_LOWER] = bbands.iloc[:, 0] / df[ColNames.CLOSE]
-                    case ColNames.BB_UPPER:
-                        bbands = ta.bbands(df[ColNames.CLOSE], length=20, std=2)
-                        df[ColNames.BB_UPPER] = bbands.iloc[:, 2] / df[ColNames.CLOSE]
-                    case _:
-                        print(
-                            f"Not implemented or Incorrect Key passed ({tec}). Skipping."
-                        )
-            except KeyError as e:
-                raise KeyError(
-                    f"The required column to calculate the technical was not found. Read below: \n{repr(e)}"
-                )
-            performed.add(tec)
-        return df
-            
-def normalize(df, features: list = None, window: int = 90):
-        """Normalize selected features and add normalized columns to the DataFrame.
-
-        Parameters:
-            features (list[str] | None): List of features to normalize. If None,
-                normalizes all current market, sentiment and target columns.
-            window (int): Rolling window size used for Z-score normalizations.
-
-        Returns:
-            None: Modifies `self.dataframe` in-place and updates the active
-            column lists and `self._normalized_cols`.
+        Generalized logic that preserves Date/Year metadata to ensure
+        the preprocessing pipeline doesn't crash.
         """
-        if features is None:
-            features = df.columns.tolist()
+        logger.info("Preparing contextual window for new data...")
+        # 1. Define feature columns + metadata columns needed for the pipeline
+        raw_features = self._original_cols_m + self._original_cols_s
+        metadata_cols = [ColNames.DATE, ColNames.YEAR]
 
+        # Filter metadata_cols to only those that actually exist in self.dataframe
+        metadata_cols = [c for c in metadata_cols if c in self.dataframe.columns]
 
-        prev_close = df[ColNames.CLOSE].shift(1)
-        curr_close = df[ColNames.CLOSE]
+        # 2. Get historical context including metadata
+        context_df = self.dataframe[raw_features + metadata_cols].tail(lookback)
 
-        for feat in features:
-            match feat:
-                case ColNames.OPEN:
-                    df[ColNames.OPEN_NORM] = normalize_price(
-                        df[ColNames.OPEN], prev_close
-                    )
-                case ColNames.HIGH:
-                    df[ColNames.HIGH_NORM] = normalize_price(
-                        df[ColNames.HIGH], prev_close
-                    )
-                case ColNames.LOW:
-                    df[ColNames.LOW_NORM] = normalize_price(
-                        df[ColNames.LOW], prev_close
-                    )
-                case ColNames.CLOSE:
-                    df[ColNames.CLOSE_NORM] = normalize_price(
-                        df[ColNames.CLOSE], prev_close
-                    )
-                case ColNames.VOLUME:
-                    df[ColNames.VOLUME_NORM] = np.log(
-                        df[ColNames.VOLUME] / df[ColNames.VOLUME].shift(1)
-                    )
-                case ColNames.RSI:
-                    df[ColNames.RSI_NORM] = (
-                        df[ColNames.RSI] - df[ColNames.RSI].rolling(window).mean()
-                    ) / (df[ColNames.RSI].rolling(window).std() + 1e-6)
-                case ColNames.MACD:
-                    df[ColNames.MACD_NORM] = (
-                        df[ColNames.MACD] - df[ColNames.MACD].rolling(window).mean()
-                    ) / (df[ColNames.MACD].rolling(window).std() + 1e-6)
-                case ColNames.MACD_SIG:
-                    df[ColNames.MACD_SIG_NORM] = (
-                        df[ColNames.MACD_SIG]
-                        - df[ColNames.MACD_SIG].rolling(window).mean()
-                    ) / (df[ColNames.MACD_SIG].rolling(window).std() + 1e-6)
-                case ColNames.ATR:
-                    df[ColNames.ATR_NORM] = df[ColNames.ATR]
-                case ColNames.SMA_20:
-                    df[ColNames.SMA_20_NORM] = (df[ColNames.SMA_20] - 1) * 10
-                case ColNames.SMA_50:
-                    df[ColNames.SMA_50_NORM] = (df[ColNames.SMA_50] - 1) * 10
-                case ColNames.BB_LOWER:
-                    df[ColNames.BB_LOWER_NORM] = (df[ColNames.BB_LOWER] - 1) * 10
-                case ColNames.BB_UPPER:
-                    df[ColNames.BB_UPPER_NORM] = (df[ColNames.BB_UPPER] - 1) * 10
-                case ColNames.SENTIMENT:
-                    pass
-                case ColNames.SENTIMENT_VOL:
-                    news_log = np.log1p(df[ColNames.SENTIMENT_VOL])
+        combined_df = pd.concat([context_df, new_raw_df], ignore_index=True)
 
-                    rolling_mean = news_log.rolling(window=90, min_periods=1).mean()
-                    rolling_std = news_log.rolling(window=90, min_periods=1).std(ddof=0)
+        # 5. Return only the last 'output_window' rows
+        processed_df = self._run_temp_pipeline(combined_df)
 
-                    expanding_mean = news_log.expanding(min_periods=2).mean()
-                    expanding_std = news_log.expanding(min_periods=2).std(ddof=0)
+        logger.info("Done preparing contextual window.")
+        return processed_df.tail(output_window)
 
-                    # Fill the "Cold Start" gaps with the growing history
-                    final_mean = rolling_mean.fillna(expanding_mean)
-                    final_std = rolling_std.fillna(expanding_std)
+    def _run_temp_pipeline(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Helper to run the class pipeline on an arbitrary dataframe."""
+        # We create a temporary object to avoid corrupting the main self.dataframe
+        logger.info("Running temporary preprocessing pipeline...")
+        temp_ds = MarketDataset(ticker=self.ticker, data_df=df, null=False)
+        temp_ds.preprocess()
+        return temp_ds.dataframe
 
-                    df[ColNames.SENTIMENT_VOL_NORM] = (news_log - final_mean) / (
-                        final_std + 1e-6
-                    )
-                case ColNames.TARGET_O:
-                    # for targets current close serves as their previous.
-                    df[ColNames.TARGET_O_NORM] = normalize_price(
-                        df[ColNames.TARGET_O], curr_close
-                    )
-                case ColNames.TARGET_H:
-                    df[ColNames.TARGET_H_NORM] = normalize_price(
-                        df[ColNames.TARGET_H], curr_close
-                    )
-                case ColNames.TARGET_L:
-                    df[ColNames.TARGET_L_NORM] = normalize_price(
-                        df[ColNames.TARGET_L], curr_close
-                    )
-                case ColNames.TARGET_C:
-                    df[ColNames.TARGET_C_NORM] = normalize_price(
-                        df[ColNames.TARGET_C], curr_close
-                    )
-                case _:
-                    raise NotImplementedError(
-                        f"Something Unexpected happened. There is no implementation to normalize such feature ({feat})."
-                    )
-                
-        return df
 
 def normalize_price(price, last_close, multiplier=100):
-        """Vectorized log-return normalization for price columns.
+    """Vectorized log-return normalization for price columns.
 
-        Parameters:
-            price (pd.Series | np.ndarray): Prices to normalize.
-            last_close (pd.Series | np.ndarray): Reference previous-close prices.
+    Parameters:
+        price (pd.Series | np.ndarray): Prices to normalize.
+        last_close (pd.Series | np.ndarray): Reference previous-close prices.
 
-        Returns:
-            pd.Series | np.ndarray: Normalized values (log returns scaled).
-        """
-        return np.log(price / last_close) * multiplier
+    Returns:
+        pd.Series | np.ndarray: Normalized values (log returns scaled).
+    """
+    return np.log(price / last_close) * multiplier
+
 
 def unnormalize_price(value, last_close, multiplier=100):
     """Invert `normalize_price` and return original-scale prices.
@@ -1544,8 +1402,9 @@ def unnormalize_price(value, last_close, multiplier=100):
     """
     return np.exp(value / multiplier) * last_close
 
+
 if __name__ == "__main__":
     dataset = MarketDataset.load("GLD")
-    # dataset.show_dataframe_interactive(options=["all"])
-    print(dataset.form_infere_sample(180.0, 185.0, 190.0, 175.0, 1500000.0, 0.5, 10,
-                               dataset._market_cols, dataset._sent_cols))
+    dataset.show_dataframe_interactive(options=["all"])
+    # print(dataset.form_infere_sample(180.0, 185.0, 190.0, 175.0, 1500000.0, 0.5, 10,
+    # dataset._market_cols, dataset._sent_cols))

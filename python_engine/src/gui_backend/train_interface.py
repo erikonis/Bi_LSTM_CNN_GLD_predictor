@@ -13,7 +13,7 @@ uv run -m src.gui_backend.train_interface --model predictor_bilstmCNN --name pre
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Gold Predictor Models")
 
-    # Define the "Arguments" Java is allowed to send
+    # Define CLI arguments (invoked by Java or CLI)
     parser.add_argument("--model", type=str, required=True, choices=ModelNames.MODELS)
     parser.add_argument("--name", type=str, required=True, help="Model name to save as")
     parser.add_argument(
@@ -39,7 +39,7 @@ if __name__ == "__main__":
         "--data_split",
         type=str,
         default=Training.DATASPLIT_EXPAND,
-        choices=[Training.DATASPLIT_EXPAND, Training.DATASPLIT_EXPAND],
+        choices=[Training.DATASPLIT_EXPAND, Training.DATASPLIT_SLIDE],
         help=f"Datasplit option. Choices: {Training.DATASPLIT_EXPAND}, {Training.DATASPLIT_SLIDE}",
     )
     parser.add_argument(

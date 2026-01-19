@@ -7,6 +7,9 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
@@ -21,6 +24,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import utils.Constants;
 import utils.ProjectPaths;
 
+/**
+ * PythonService manages the lifecycle and communication channel to the
+ * external Python engine. It starts the Python process, allocates TCP
+ * ports for RPC and heartbeat, and provides methods to send commands and
+ * monitor liveness.
+ */
 public class PythonService {
     private Process pythonProcess;
     private int port;
@@ -31,10 +40,23 @@ public class PythonService {
     private static final ObjectMapper mapper = new ObjectMapper();
     private boolean connected = false;
 
+    /**
+     * Create a PythonService bound to the given Python script path.
+     *
+     * @param scriptPath filesystem path to the Python entry script to run
+     */
     public PythonService(String scriptPath) {
         this.scriptPath = scriptPath;
     }
 
+    /**
+     * Start the Python process and allocate dynamic ports for RPC and
+     * heartbeat. The method will launch the Python interpreter from the
+     * project's virtual environment and begin the heartbeat warmup.
+     *
+     * @throws IOException if the process cannot be started or ports cannot
+     *                     be allocated
+     */
     public void start() throws IOException {
         // 1. Find a free port
         try (ServerSocket socket = new ServerSocket(0);
@@ -48,9 +70,17 @@ public class PythonService {
 
         File scriptFile = new File(this.scriptPath).getAbsoluteFile();
 
-        ProcessBuilder pb = new ProcessBuilder(
-                "cmd", "/c",
-                "python \"" + scriptFile.getPath() + "\" --port " + this.port + " --hport " + this.heartPort);
+        Path venvPath = ProjectPaths.PYTHON_CWD.getPath().resolve(".venv/Scripts/python.exe");
+
+        List<String> command = new ArrayList<>();
+        command.add(venvPath.toString());
+        command.add(scriptFile.getPath());
+        command.add("--port");
+        command.add(String.valueOf(this.port));
+        command.add("--hport");
+        command.add(String.valueOf(this.heartPort));
+
+        ProcessBuilder pb = new ProcessBuilder(command);
 
         Map<String, String> env = pb.environment();
         env.put("PYTHONPATH", ProjectPaths.PYTHON_CWD.getPath().toString());
@@ -120,7 +150,7 @@ public class PythonService {
 
                     try (PrintWriter out = new PrintWriter(s.getOutputStream(), true);
                             BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()))) {
-                        //System.out.println("ping");
+                        // System.out.println("ping");
                         out.println("{\"status\": \"ping\"}");
                         String response = in.readLine();
 
@@ -146,6 +176,17 @@ public class PythonService {
         }
     }
 
+    /**
+     * Send a JSON-RPC style command to the Python service and wait for a
+     * JSON response. This method blocks until a response is received or
+     * the configured timeout elapses. Retries are attempted on transient
+     * failures.
+     *
+     * @param action the command/action name understood by the Python side
+     * @param dataJson the JSON-encoded payload to send as the "data" field
+     * @param timeout timeout in seconds to wait for the Python reply
+     * @return parsed JsonNode from the Python response or an error node on failure
+     */
     public synchronized JsonNode sendCommand(String action, String dataJson, int timeout) {
         while (!this.connected) {
             try {
@@ -153,7 +194,7 @@ public class PythonService {
             } catch (InterruptedException ignored) {
             }
         }
-        
+
         int maxRetries = 3;
         for (int i = 0; i < maxRetries; i++) {
             try (Socket socket = new Socket("127.0.0.1", this.port);
@@ -190,10 +231,21 @@ public class PythonService {
         return createErrorNode("Connection failed");
     }
 
+    /**
+     * Convenience overload sending a command using a default timeout of 5 seconds.
+     *
+     * @param action the command/action name
+     * @param dataJson the JSON payload for the command
+     * @return response JsonNode from Python or an error node
+     */
     public JsonNode sendCommand(String action, String dataJson) {
         return sendCommand(action, dataJson, 5);
     }
 
+    /**
+     * Gracefully stop the Python service: stop heartbeat, send shutdown
+     * command to Python and destroy the process.
+     */
     public void stop() {
         heartbeat.shutdownNow(); // Stop the heartbeat first
         if (pythonProcess != null) {
@@ -202,10 +254,38 @@ public class PythonService {
         }
     }
 
+    /**
+     * Forcefully terminate the Python process. On Windows this uses
+     * `taskkill` to kill the process tree; on other OSes it invokes
+     * `destroyForcibly()`.
+     */
+    public void forcekill() {
+        heartbeat.shutdownNow(); // Stop the heartbeat first
+        if (pythonProcess != null && pythonProcess.isAlive()) {
+            try {
+                // Windows-specific: Kill the process and all its children (/T) forcibly (/F)
+                if (System.getProperty("os.name").toLowerCase().contains("win")) {
+                    long pid = pythonProcess.pid();
+                    Runtime.getRuntime().exec("taskkill /F /T /PID " + pid);
+                } else {
+                    pythonProcess.destroyForcibly();
+                }
+            } catch (IOException e) {
+                pythonProcess.destroyForcibly();
+            }
+        }
+    }
+
+    /**
+     * @return the RPC port assigned to the Python service
+     */
     public int getPort() {
         return port;
     }
 
+    /**
+     * @return the heartbeat port assigned to the Python service
+     */
     public int getHeartPort() {
         return heartPort;
     }

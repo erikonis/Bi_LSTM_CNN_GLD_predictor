@@ -6,14 +6,20 @@ from src.python_engine.inference.inference import ModelInference
 from src.utils.data_management import get_available_tickers
 
 
+"""CLI for querying model inputs or running a single-step inference.
 
-"""
-E.g. Usage:
-uv run -m src.gui_backend.inference_interface --action get_inputs --ticker GLD --model predictor_bilstmCNN_GLD --json
-uv run -m src.gui_backend.inference_interface --action infer --ticker GLD --model predictor_bilstmCNN_GLD --open 150 --high 155 --low 149 --close 154 --volume 1000000 --json
+Provides a small wrapper used by the Java front-end to call Python inference.
 """
 
 def main():
+    """CLI entrypoint to query model inputs or run a single inference.
+
+    The function parses CLI args, instantiates `ModelInference`, and prints
+    either required input columns or prediction results (optionally as JSON).
+
+    Returns:
+        None (prints or exits with code 1 on errors).
+    """
     parser = argparse.ArgumentParser(description="Run model inference or query required inputs")
 
     parser.add_argument(

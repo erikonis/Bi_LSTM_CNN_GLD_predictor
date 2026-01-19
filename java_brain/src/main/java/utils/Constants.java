@@ -1,5 +1,9 @@
 package utils;
 
+/**
+ * Small enum holding well-known constant names used across the Java
+ * application (primarily for logger names).
+ */
 public enum Constants {
     LOG_COMMS_NAME("COMMS"),
     LOG_BRAIN_NAME("BRAIN");

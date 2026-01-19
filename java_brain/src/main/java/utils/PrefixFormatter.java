@@ -5,6 +5,9 @@ import java.util.Date;
 import java.util.logging.Formatter;
 import java.util.logging.LogRecord;
 
+/**
+ * Log formatter that prefixes log messages with a timestamp and level.
+ */
 public class PrefixFormatter extends Formatter {
     private final String prefix;
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("MM/dd/yy HH:mm:ss");

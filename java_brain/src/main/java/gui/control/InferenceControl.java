@@ -8,10 +8,22 @@ import static gui.styles.Constants.RED_BORDER;
 import gui.view.MainView;
 import javafx.scene.control.TextField;
 
+/**
+ * InferenceControl manages the selectors and input validation for the
+ * inference pane. It keeps the model and ticker lists synchronized and
+ * validates numeric input fields.
+ */
 public class InferenceControl {
     private static final String NEUTRAL = "";
     private static boolean isUpdating = false;
 
+    /**
+     * Validate that the ticker, model and OHLCV inputs are present and the
+     * numeric fields can be parsed.
+     *
+     * @param view main view containing input controls
+     * @return true if all inputs are valid
+     */
     public static boolean validateInputs(MainView view) {
         boolean isValid = true;
 
@@ -54,6 +66,12 @@ public class InferenceControl {
         return isValid;
     }
 
+    /**
+     * Initialize dynamic behavior for model/ticker selectors so that
+     * selecting one filters the other and keeps a neutral option.
+     *
+     * @param view main view containing selectors
+     */
     public static void initDynamicSelectors(MainView view) {
         // Initial population
         resetModelList(view);
@@ -115,5 +133,15 @@ public class InferenceControl {
     private static void resetTickerList(MainView view) {
         view.tickerSelector.getItems().setAll(NEUTRAL);
         view.tickerSelector.getItems().addAll(Models.tickerToModels.keySet());
+    }
+
+    /**
+     * Reset and refresh both model and ticker selectors (used after model updates).
+     *
+     * @param view main view
+     */
+    public static void refreshSelectors(MainView view) {
+        resetModelList(view);
+        resetTickerList(view);
     }
 }

@@ -1,11 +1,17 @@
 import java.util.logging.Logger;
 
 import gui.MainGUI;
+import gui.data.ModelSynchronizer;
 import gui.data.Models;
 import utils.Constants;
 import utils.LogConfig;
 import utils.ProjectPaths;
 
+/**
+ * Application entry point for the Java GUI and orchestration layer.
+ *
+ * Initializes loggers, model registry and launches the JavaFX UI.
+ */
 public class Main {
     public static void main(String[] args) {
         LogConfig.wipeLogs();
@@ -16,12 +22,15 @@ public class Main {
         commsLogger.info("Java Comms System Started");
         brainLogger.info("Java Brain System Started");
 
-        Models.initialize(ProjectPaths.MODEL_INFO.getPath().toString());        
+        ModelSynchronizer.sync();
+        Models.initialize();        
 
+        /**
+         * Launch the JavaFX application. This call blocks until the JavaFX
+         * runtime has been initialized and is running.
+         *
+         * @param args command-line arguments forwarded to the JavaFX runtime
+         */
         javafx.application.Application.launch(MainGUI.class, args); 
-
-        //PythonComms comms = new PythonComms();
-        //comms.test();
-        //PythonComms.test_all();
     }
 }

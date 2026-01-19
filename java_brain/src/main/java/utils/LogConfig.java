@@ -11,6 +11,9 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class LogConfig {
+    /**
+     * Configure and manage per-component Java loggers (file + console).
+     */
     public static void createLogger(String loggerName, String fileName) {
         Logger logger = Logger.getLogger(loggerName);
         try {
@@ -36,6 +39,12 @@ public class LogConfig {
         }
     }
 
+    /**
+     * Ensure a log file exists and truncate it. Parent directories are
+     * created if necessary.
+     *
+     * @param filePath path to the file to wipe or create
+     */
     public static void wipeOrCreateFile(String filePath) {
         try {
             Path path = Paths.get(filePath);
@@ -56,6 +65,10 @@ public class LogConfig {
         }
     }
 
+    /**
+     * Convenience helper to wipe the standard set of log files used by the
+     * application.
+     */
     public static void wipeLogs(){
         wipeOrCreateFile(ProjectPaths.COMMS_LOG.getPath().toString());
         wipeOrCreateFile(ProjectPaths.BRAIN_LOG.getPath().toString());

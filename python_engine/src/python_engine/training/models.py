@@ -1,3 +1,10 @@
+"""Model classes, losses and helpers for the training pipeline.
+
+Contains model definitions, loss implementations and utilities used by the
+training scripts. Only comments and docstrings edited to be clearer; code
+behavior is unchanged.
+"""
+
 from src.python_engine.training.Constants import ModelConst
 from src.utils.MetaConstants import UNKNOWN, MetaKeys
 import torch
@@ -18,6 +25,15 @@ class LogOHLCLoss(nn.Module):
         self.penalty_weight = penalty_weight
 
     def forward(self, pred, target):
+        """Compute loss combining Huber regression loss with structural penalties.
+
+        Args:
+            pred: Predicted tensor of shape (batch, n_outputs).
+            target: Ground-truth tensor of matching shape.
+
+        Returns:
+            torch.Tensor: Scalar loss value combining regression and penalties.
+        """
         # 1. Base Regression Loss (Standard Huber)
         base_loss = self.mse(pred, target)
 
@@ -48,6 +64,16 @@ class Attention(nn.Module):
         self.attn = nn.Linear(hidden_dim, 1)
 
     def forward(self, lstm_output):
+        """Compute attention-weighted context from LSTM outputs.
+
+        Args:
+            lstm_output: Tensor shaped (batch, seq_len, hidden_dim).
+
+        Returns:
+            tuple: (context, attention_weights)
+                - context: Tensor (batch, hidden_dim) aggregated by attention.
+                - attention_weights: Tensor (batch, seq_len, 1) soft attention scores.
+        """
         # lstm_output shape: (batch, seq_len, hidden_dim)
         attn_weights = torch.tanh(self.attn(lstm_output))  # (batch, seq_len, 1)
         soft_attn_weights = F.softmax(attn_weights, dim=1)
@@ -64,6 +90,14 @@ class EarlyStopping:
         self.early_stop = False
 
     def __call__(self, val_loss):
+        """Update internal early-stopping counters based on latest validation loss.
+
+        Args:
+            val_loss: Latest validation loss (float).
+
+        Side effects:
+            Updates `self.counter`, `self.best_loss` and may set `self.early_stop`.
+        """
         if self.best_loss is None:
             self.best_loss = val_loss
         elif val_loss > self.best_loss - self.min_delta:
@@ -146,7 +180,14 @@ class PredictorSkeleton(ABC, nn.Module):
         return checkpoint.get("fold", 0)
 
 def sanitize_dict(d):
-    """Recursively convert numpy types to native Python types."""
+    """Recursively convert numpy scalars/arrays to native Python types.
+
+    Args:
+        d: Dict potentially containing numpy types.
+
+    Returns:
+        dict: Copy of `d` where numpy types are converted (floats, ints, lists).
+    """
     import numpy as np
     new_dict = {}
     for k, v in d.items():

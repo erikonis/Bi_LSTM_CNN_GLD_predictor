@@ -2,6 +2,11 @@ package utils;
 import java.io.File;
 import java.nio.file.Path;
 
+/**
+ * ProjectPaths lists common repository-relative paths used throughout the
+ * application and provides helpers to resolve them to absolute `Path` or
+ * `File` instances based on the discovered application root.
+ */
 public enum ProjectPaths {
     DATA("data"),
     CONFIG("config"),
@@ -27,12 +32,20 @@ public enum ProjectPaths {
     }
 
     /**
-     * Resolves the absolute path based on the Application Root.
+     * Resolve the configured relative path to an absolute {@link java.nio.file.Path}
+     * using the detected application root.
+     *
+     * @return absolute Path for the enum entry
      */
     public Path getPath() {
         return PathManager.getAppRoot().resolve(relativePath);
     }
 
+    /**
+     * Convenience to obtain a {@link java.io.File} for the path.
+     *
+     * @return File corresponding to the resolved path
+     */
     public File getFile() {
         return getPath().toFile();
     }

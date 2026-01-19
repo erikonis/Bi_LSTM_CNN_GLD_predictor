@@ -1,3 +1,10 @@
+"""FinBERT sentiment helpers: tokenize, score and aggregate article summaries.
+
+Provides small utilities to load the FinBERT model/tokenizer and convert
+article text into a single sentiment score. JSON encoder `NpEncoder` helps
+serialize numpy types when writing outputs.
+"""
+
 import torch
 from transformers import BertTokenizer, BertForSequenceClassification
 import pandas as pd
@@ -8,8 +15,9 @@ from datetime import datetime
 
 import numpy as np
 
-# Handling numpy types in json
+
 class NpEncoder(json.JSONEncoder):
+    """JSON encoder that converts numpy scalars/arrays to native Python types."""
     def default(self, obj):
         if isinstance(obj, np.floating):
             return float(obj)
@@ -20,17 +28,19 @@ class NpEncoder(json.JSONEncoder):
         return super(NpEncoder, self).default(obj)
 
 
-# 1. Load the Model and Tokenizer
-# 'ProsusAI/finbert' is the most popular pre-trained version
+# Load the pretrained FinBERT tokenizer and model
 model_name = "ProsusAI/finbert"
 tokenizer = BertTokenizer.from_pretrained(model_name)
 model = BertForSequenceClassification.from_pretrained(model_name)
 
 def _build_head_tail_input_ids(text: str) -> list:
-    """Build input_ids using fixed head/tail split (128, -382) and pad to 512.
+    """Build 512-length token ids using a fixed head/tail split.
 
-    This enforces the exact split you requested. Returns a list of length 512
-    containing token ids (padded with `pad_token_id`).
+    Args:
+        text: Article text to tokenize.
+
+    Returns:
+        list[int]: Padded list of token ids of length 512.
     """
     tokens = tokenizer.encode(str(text), add_special_tokens=False)
     if len(tokens) > 510:
@@ -47,9 +57,14 @@ def _build_head_tail_input_ids(text: str) -> list:
 
 
 def get_article_score(text: str, device: torch.device = None) -> float:
-    """Return a single sentiment score (pos - neg) for one article.
+    """Compute a single sentiment score for `text` using FinBERT.
 
-    Uses the fixed 128 / -382 head-tail token split and does not return masks.
+    Args:
+        text: Article text string.
+        device: Optional torch.device to run the model on.
+
+    Returns:
+        float: Score computed as (pos_prob - neg_prob). Returns 0.0 for empty input.
     """
     if not text or pd.isna(text):
         return 0.0
@@ -69,9 +84,14 @@ def get_article_score(text: str, device: torch.device = None) -> float:
 
 
 def get_day_score(summaries: list, device: torch.device = None):
-    """Compute day's average score and article count from a list of summaries.
+    """Aggregate per-article scores into a day-level mean and count.
 
-    Returns: [avg_score, count]
+    Args:
+        summaries: List of article summary strings for a single day.
+        device: Optional torch.device to run FinBERT on.
+
+    Returns:
+        tuple: (average_score (float), count (int)).
     """
     if not summaries:
         return [0.0, 0.0]
@@ -90,11 +110,15 @@ def get_day_score(summaries: list, device: torch.device = None):
 
 
 def process_summaries_to_scores(read_glob: str, output_file: str, device: torch.device = None):
-    """Read all JSON files matching `read_glob`, compute daily scores, and write `output_file`.
+    """Read JSON summaries matching `read_glob`, compute per-day FinBERT scores, and write a JSON file.
 
-    The output JSON maps date (YYYY-MM-DD) -> [avg_score, count]. The function
-    follows the same aggregation logic previously in `main` but uses
-    `get_day_score` to compute per-day values.
+    Args:
+        read_glob: Glob pattern to match input JSON summary files.
+        output_file: Path to write daily scores JSON mapping date->(score,count).
+        device: Optional torch.device to run scoring on.
+
+    Returns:
+        dict: Mapping date-string -> [avg_score, count] that was written to disk.
     """
     file_paths = glob.glob(read_glob)
     if not file_paths:

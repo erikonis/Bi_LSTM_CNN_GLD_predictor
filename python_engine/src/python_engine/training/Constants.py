@@ -79,8 +79,8 @@ class ColNames:
     NOT_TO_NORM_MAP = {v: k for k, v in NORM_TO_NOT_MAP.items()}
 
 class Training:
-    DATASPLIT_EXPAND = "expanding_window"
-    DATASPLIT_SLIDE = "sliding_window"
+    DATASPLIT_EXPAND = "expand"
+    DATASPLIT_SLIDE = "slide"
 
 class ModelConst:
     MODEL_STATE_DICT = "model_state_dict"

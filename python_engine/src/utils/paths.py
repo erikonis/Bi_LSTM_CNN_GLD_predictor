@@ -1,11 +1,14 @@
 from pathlib import Path
 import os
 
+"""Path helpers used to locate project, application, and data directories.
 
-# 1. Start at THIS file's location
-# 2. Go up until you find the folder containing 'pyproject.toml'
+Functions return Path objects and ensure required folders exist.
+"""
+
+
 def get_project_root() -> Path:
-    """Finds the root of the project by looking for pyproject.toml."""
+    """Find the project root by locating `pyproject.toml` in parent folders."""
     for parent in Path(__file__).resolve().parents:
         if (parent / "pyproject.toml").exists():
             return parent
@@ -14,7 +17,7 @@ def get_project_root() -> Path:
 
 
 def get_app_root() -> Path:
-    """Finds the root of the application by looking for 'java_brain' folder."""
+    """Find the application root by locating a `java_brain` folder in parents."""
     for parent in Path(__file__).resolve().parents:
         if (parent / "java_brain").exists():
             return parent
@@ -22,7 +25,7 @@ def get_app_root() -> Path:
     return Path.cwd()
 
 
-# Define global constants for your folders
+# Global folder constants
 root_dir = get_app_root()
 project_root = get_project_root()
 
@@ -62,16 +65,14 @@ QUARANTINE_DIR.mkdir(exist_ok=True)
 
 
 def get_model_dir(ticker: str, model_name: str):
-    """
-    Get or create the model and results directories for a specific ticker and model name.
-    Returns both the model directory and the results directory paths.
-        Args:
-            ticker (str): The stock ticker symbol.
-            model_name (str): The name of the model.
+    """Return (model_dir, results_dir), creating them if necessary.
 
-        Returns:
-            Tuple[Path, Path]: The paths to the model directory and results directory for the given ticker and model name.
+    Args:
+        ticker: Stock ticker symbol.
+        model_name: Model identifier.
 
+    Returns:
+        Tuple[Path, Path]: model directory and results directory paths.
     """
     model_folder = MODELS_DIR / ticker / model_name
     os.makedirs(model_folder, exist_ok=True)
@@ -81,13 +82,13 @@ def get_model_dir(ticker: str, model_name: str):
 
 
 def get_dataset_dir(ticker: str):
-    """
-    Get or create the dataset directory for a specific ticker.
-     Args:
-        ticker (str): The stock ticker symbol.
+    """Return dataset folder for `ticker`, creating it if missing.
 
-     Returns:
-        Path: The path to the dataset directory for the given ticker.
+    Args:
+        ticker: Stock ticker symbol.
+
+    Returns:
+        Path: dataset path for the ticker.
     """
     ticker = ticker.upper()
     data_folder = DATASETS_DIR / ticker

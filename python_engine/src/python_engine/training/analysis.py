@@ -146,6 +146,19 @@ def plot_training_history(history: dict, filename: str, metrics: dict = None):
 def plot_interpretability_report(
     model, val_loader, mkt_cols, sent_cols, fold, filename
 ):
+    """Generate an interpretability report with attention and permutation plots.
+
+    Args:
+        model: Trained torch model used for inference.
+        val_loader: Validation DataLoader to sample data from.
+        mkt_cols: List of market feature names.
+        sent_cols: List of sentiment feature names.
+        fold: Fold identifier (int or str) used in titles/filenames.
+        filename: Base filename where the report PNG will be saved.
+
+    Returns:
+        None (saves PNG file to disk).
+    """
     # 1. Setup
     all_feature_names = mkt_cols + sent_cols
     fig, axs = plt.subplots(2, 1, figsize=(16, 12))
@@ -214,6 +227,19 @@ def plot_interpretability_report(
 def calculate_permutation_importance(
     model, val_loader, mkt_cols, sent_cols, fold, filename
 ):
+    """Compute permutation importance per feature measured by MAE increase.
+
+    Args:
+        model: Trained torch model.
+        val_loader: DataLoader yielding validation batches.
+        mkt_cols: List of market feature names.
+        sent_cols: List of sentiment feature names.
+        fold: Fold identifier for labeling.
+        filename: If provided, save a barplot of importances to this path.
+
+    Returns:
+        dict: Mapping feature_name -> relative importance (ratio increase in MAE).
+    """
     device = next(model.parameters()).device
     model.eval()
     c_id = -1
@@ -282,6 +308,17 @@ def calculate_permutation_importance(
 
 
 def plot_feature_time_heatmap(model, val_loader, feature_names, filename):
+    """Plot a saliency heatmap showing feature importance over time.
+
+    Args:
+        model: Trained torch model (must support backward for gradients).
+        val_loader: DataLoader to fetch an example batch.
+        feature_names: List of feature names for Y-axis labels.
+        filename: Path to save the generated heatmap PNG.
+
+    Returns:
+        None (saves PNG file).
+    """
     model.eval()
     device = next(model.parameters()).device
 
@@ -326,6 +363,16 @@ def plot_feature_time_heatmap(model, val_loader, feature_names, filename):
 
 
 def plot_feature_weights(model, feature_names, filename):
+    """Plot mean absolute CNN input-channel weights as a horizontal bar chart.
+
+    Args:
+        model: Trained torch model with attribute `cnn5` (Conv1d layer).
+        feature_names: List of feature names corresponding to input channels.
+        filename: Path to save the bar chart PNG.
+
+    Returns:
+        None (saves PNG file).
+    """
     # model.cnn3 is the first layer. Shape: (out_channels, in_channels, kernel_size)
 
     weights = model.cnn5.weight.data.cpu().abs().mean(dim=(0, 2)).numpy()
@@ -342,6 +389,16 @@ def plot_feature_weights(model, feature_names, filename):
 
 
 def plot_maw_progression(weight_history, fold_num, filename: str):
+    """Plot progression of mean-absolute weights per feature across epochs.
+
+    Args:
+        weight_history: Dict mapping feature_name -> list of values per epoch.
+        fold_num: Identifier for the fold (used in title).
+        filename: Output PNG path to save the plot.
+
+    Returns:
+        None (saves PNG file).
+    """
     plt.figure(figsize=(10, 6))
     for feature_name, values in weight_history.items():
         plt.plot(values, label=feature_name)
@@ -359,6 +416,18 @@ def plot_maw_progression(weight_history, fold_num, filename: str):
 def plot_model_results(preds, targets, backtest_results, filename: str):
     """
     4-Panel Dashboard: Equity, Drawdown, Prediction Scatter, and Error Histogram.
+    """
+    # Document parameters and return value
+    """Create a 4-panel dashboard of backtest and prediction diagnostics.
+
+    Args:
+        preds: numpy array of model predictions (num_samples, n_outputs).
+        targets: numpy array of ground-truth targets.
+        backtest_results: Dict returned by `backtest_with_costs` containing equity curves.
+        filename: Path to save the dashboard PNG.
+
+    Returns:
+        None (saves PNG file).
     """
     fig, axes = plt.subplots(2, 2, figsize=(18, 12))
     axes = axes.flatten()
@@ -558,8 +627,17 @@ def calculate_trading_metrics(
 def backtest_with_costs(
     preds, targets, initial_capital=1000.0, threshold=0.001, fee=0.0005
 ):
-    """
-    Simulates trading with compounding returns and transaction fees.
+    """Simulate a simple threshold-based trading strategy and compute metrics.
+
+    Args:
+        preds: Array of predicted returns (num_samples, n_outputs) or (num_samples,).
+        targets: Array of actual returns used for P&L calculation.
+        initial_capital: Starting capital in USD.
+        threshold: Threshold on predicted close-return to trigger long/short.
+        fee: Proportional transaction fee applied when changing position.
+
+    Returns:
+        dict: Simulation outputs including `equity_curve`, `buy_and_hold`, `num_trades`, `sharpe_ratio`, `final_value`.
     """
     c_id = -1
 
@@ -615,9 +693,16 @@ def backtest_with_costs(
 
 
 def find_best_threshold(preds, targets, logger=None):
-    print("\n--- Threshold Sensitivity Analysis ---")
-    print(f"{'Threshold':<12} | {'Trades':<8} | {'Final Value':<12} | {'Sharpe'}")
-    print("-" * 50)
+    """Test several decision thresholds and print/signal summary statistics.
+
+    Args:
+        preds: Predicted returns array.
+        targets: Actual returns array.
+        logger: Optional logger to write results instead of printing.
+
+    Returns:
+        None (prints or logs a small summary table).
+    """
 
     # Sensible thresholds in fractional decimal: 0.1% -> 0.001, 0.2% -> 0.002
     thresholds = [0.001, 0.002, 0.003, 0.005]

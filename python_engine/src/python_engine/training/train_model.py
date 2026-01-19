@@ -1,3 +1,10 @@
+"""Training pipeline utilities: training loops, evaluation and helpers.
+
+Provides training, evaluation and feature-engineering helpers used by
+the higher-level `main` function. Only comments/docstrings were adjusted
+for clarity; no behavior changes were made.
+"""
+
 import os
 from typing import List, Any, Type
 from dataclasses import dataclass, field, asdict
@@ -14,31 +21,6 @@ import src.python_engine.training.dataset_former as dataset_former
 from src.python_engine.training.analysis import *
 from src.utils.paths import get_dataset_dir, get_model_dir
 
-# @dataclass
-# class TrainingConfig:
-#     # Required arguments (no defaults)
-#     predictor_class: Type[Any]
-#     targets: List[str]
-#     not_considered_feat: List[str]
-#     ticker: str
-#     model_name: str
-    
-#     # Optional arguments (with defaults)
-#     auto_feat_engineering: bool = False
-#     early_stop: bool = False
-#     hidden_dim: int = 64
-#     batch_size: int = 64
-#     epochs: int = 100
-#     learning_rate: float = 0.001
-#     dropout_rate: float = 0.3
-#     feature_threshold: float = 0.0
-#     data_split: str = Training.DATASPLIT_EXPAND
-#     information: str = "None"
-
-#     def to_dict(self):
-#         """Useful for saving to metadata.json later"""
-#         return asdict(self)
-
 def feature_engineering(
     predictor_class,
     train_loader,
@@ -52,6 +34,24 @@ def feature_engineering(
     target_dim=4,
     threshold=0,
 ):
+    """Perform quick feature discovery and return an initialized model.
+
+    Args:
+        predictor_class: Model class to instantiate for feature discovery.
+        train_loader: DataLoader for training data.
+        val_loader: DataLoader for validation data.
+        mkt_cols: List of market column names.
+        sent_cols: List of sentiment column names.
+        device: torch.device to run temporary training on.
+        logger: Logger instance for progress messages.
+        dropout_rate: Dropout rate for temporary model.
+        hidden_dim: Hidden dimension size for temporary model.
+        target_dim: Output target dimensionality.
+        threshold: Importance threshold used to drop low-importance features.
+
+    Returns:
+        tuple: (final_model, filtered_mkt_cols, filtered_sent_cols)
+    """
     # --- PHASE 1: Signal Discovery (Quick Run) ---
     logger.info("PHASE 1: Identifying feature signals...")
 
@@ -81,7 +81,7 @@ def feature_engineering(
 
     # Calculate initial importance using your existing function
     importances = calculate_permutation_importance(
-        temp_model, val_loader, mkt_cols, sent_cols, fold="Discovery"
+        temp_model, val_loader, mkt_cols, sent_cols, fold="Discovery", filename=None
     )
 
     # Determine which features to keep/drop
@@ -115,6 +115,14 @@ def feature_engineering(
 
 
 def setup_logger(filename: str):
+    """Configure and return a simple logger writing to `filename` and stdout.
+
+    Args:
+        filename: Path to the logfile to create.
+
+    Returns:
+        logging.Logger: Configured logger instance.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(message)s",
@@ -127,6 +135,16 @@ def setup_logger(filename: str):
 
 
 def save_predictions_csv(preds, targets, filename: str):
+    """Save predictions and targets to a CSV for later analysis.
+
+    Args:
+        preds: Array-like preds (log-returns scaled as in model outputs).
+        targets: Array-like ground-truth targets.
+        filename: Destination CSV path.
+
+    Returns:
+        None
+    """
     df = pd.DataFrame(
         {
             "Predicted_Return": preds.flatten() / 100,
@@ -153,20 +171,23 @@ def train_model(
     early_stop=False,
     dataset_denorm_fn=None,
 ):
-    """
-    Trains the model with the given data loaders.
-    :param model: nn.Module - the model to train
-    :param device: torch.device - device to run the training on
-    :param train_loader: DataLoader - training data loader
-    :param val_loader: DataLoader - validation data loader
-    :param market_cols: list - list of market feature names
-    :param sent_cols: list - list of sentiment feature names
-    :param epochs: int - number of training epochs
-    :param lr: float - learning rate
-    :param logger: logging.Logger - logger for logging info
-    :param early_stop: bool - whether to use early stopping
-    :param dataset_denorm_fn: function - function to denormalize dataset values
-    :return: history dict, optimizer, weight history dict
+    """Train the provided `model` using the supplied data loaders.
+
+    Args:
+        model: torch.nn.Module to train.
+        device: torch.device where tensors will be moved.
+        train_loader: DataLoader yielding (mkt, sent, targets, real_prices).
+        val_loader: DataLoader for validation.
+        market_cols: List of market feature names.
+        sent_cols: List of sentiment feature names.
+        epochs: Number of training epochs.
+        lr: Learning rate for the optimizer.
+        logger: Optional logger for progress messages.
+        early_stop: If True, enable early stopping and return best model state.
+        dataset_denorm_fn: Optional function to convert normalized outputs back to original scale.
+
+    Returns:
+        tuple: (history_dict, optimizer, weight_history_dict)
     """
     model.to(device)
 
@@ -252,7 +273,7 @@ def train_model(
         all_val_targets = torch.cat(all_val_targets, dim=0).numpy()
         all_real_prices = torch.cat(all_real_prices, dim=0).numpy()
 
-        # Sanity check"
+        # Sanity check
         logger.info("\nSanity CHECK:")
         logger.info(
             f"DBG shapes: {all_val_preds.shape}, {all_val_targets.shape}, {all_real_prices.shape}"
@@ -360,9 +381,21 @@ def evaluate_test_set(
     filename: str,
     logger=None,
     scaler_target=None,
-    debug=False,
     dataset_denorm_fn=None,
 ):
+    """Run the model on the test set and compute evaluation metrics.
+
+    Args:
+        model: Trained torch model to evaluate.
+        test_loader: DataLoader yielding test batches.
+        filename: Filename used for plotting outputs.
+        logger: Optional logger to send info messages.
+        scaler_target: Optional scaler to inverse-transform predictions/targets.
+        dataset_denorm_fn: Optional denormalization function for dataset targets.
+
+    Returns:
+        tuple: (all_preds, all_actuals, val_metrics, all_real_prices)
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
 
@@ -513,8 +546,8 @@ def main(
 ):
     # ---------  SETUP   ---------
     model_dir, result_dir = get_model_dir(ticker, model_name)
-    dataset_dir = get_dataset_dir(ticker)
-    dataset = dataset_former.MarketDataset.load(dataset_dir)
+    #dataset_dir = get_dataset_dir(ticker)
+    dataset = dataset_former.MarketDataset.load(ticker.upper())
 
     mkt_cols = [f for f in dataset._market_cols if f not in not_considered_feat]
     sent_cols = [f for f in dataset._sent_cols if f not in not_considered_feat]

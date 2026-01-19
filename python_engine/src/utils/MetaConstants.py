@@ -1,3 +1,8 @@
+"""Constant keys used in metadata and configuration JSON files.
+
+Keep string keys centralized to avoid duplication across the codebase.
+"""
+
 UNKNOWN = "unknown"
 
 
