@@ -1,5 +1,13 @@
-[01/19/26 21:52:20] INFO    Java Comms System Started
-[01/19/26 21:52:21] INFO    Allocated port 63955 for Python service.
-[01/19/26 21:52:21] INFO    Allocated heartbeat port 63956 for Python service.
-[01/19/26 21:52:21] INFO    Python service started on port: 63955
-[01/19/26 21:52:21] INFO    Entering warmup phase. Waiting for Python to bind to port 63956...
+[01/19/26 23:56:31] INFO    Java Comms System Started
+[01/19/26 23:56:32] INFO    Allocated port 60531 for Python service.
+[01/19/26 23:56:32] INFO    Allocated heartbeat port 60532 for Python service.
+[01/19/26 23:56:32] INFO    Python service started on port: 60531
+[01/19/26 23:56:32] INFO    Entering warmup phase. Waiting for Python to bind to port 60532...
+[PYTH-COMMS]  2026-01-19 23:56:42,504 - INFO - Received args: Namespace(port=60531, hport=60532)
+[PYTH-COMMS]  2026-01-19 23:56:42,506 - INFO - Starting JavaBridge...
+[PYTH-COMMS]  2026-01-19 23:56:42,508 - INFO - Command listener active on port 60531
+[PYTH-COMMS]  2026-01-19 23:56:42,509 - INFO - Heartbeat listener active on port 60532
+[01/19/26 23:56:42] INFO    Python is READY. Connection established after 10s
+[01/19/26 23:57:22] SEVERE  Python OS process is no longer running.
+[01/19/26 23:57:23] SEVERE  Final attempt failed: Connection refused: connect
+[01/19/26 23:57:29] SEVERE  Final attempt failed: Connection refused: connect

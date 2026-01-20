@@ -164,7 +164,7 @@ class JavaBridge:
 
             elif action == "train":
                 loggerBrain.info(f"Starting training pipeline for ticker: {data.get('ticker')}")
-                    try:
+                try:
                     # Map string name to Class reference
                     model_class = name_to_class(data.get("model"))
                     
@@ -193,7 +193,6 @@ class JavaBridge:
                 except Exception as train_error:
                     loggerBrain.error(f"Pipeline Execution Error: {train_error}")
                     return {"status": "error", "message": str(train_error)}
-
 
             loggerComms.warning(f"Unknown action received: {action}")
             return {"status": "error", "message": "Unknown action"}

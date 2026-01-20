@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "type": "java",
+            "name": "Main",
+            "request": "launch",
+            "mainClass": "Main",
+            "projectName": "java_brain"
+        },
+        {
             "name": "Python Debugger: Python File",
             "type": "debugpy",
             "request": "launch",
