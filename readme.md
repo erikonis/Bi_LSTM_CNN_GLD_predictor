@@ -86,7 +86,6 @@ If the application crashes, check the `/logs` folder:
 * **comms.log**: Issues with the socket connection between Java and Python.
 
 
-
 ---
 
 (c) 2026 BSP3 Project, Erikas Kadiša
