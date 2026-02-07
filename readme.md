@@ -5,6 +5,8 @@ This project is a sophisticated financial time-series forecasting system specifi
 
 The system uses an **Early Fusion** approach, combining market technical indicators with sentiment data to provide a holistic view of price movements.
 
+The obtained model is capable of successfully predicting next-day closing price for test years 2021-2022, but fails further due to the skyrocketing prices in the recent years. A whitepaper is also provided, describing technical details of the project (`project_report.pdf`).
+
 ## Key Features
 *   **Hybrid Deep Learning Architecture:**
     *   **CNN Branch:** Utilizes 1D-Convolutional layers for automated feature extraction and noise reduction from raw financial data.
