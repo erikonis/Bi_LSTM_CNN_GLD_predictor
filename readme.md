@@ -102,6 +102,8 @@ Run the script:
 * **data/**: Where your models and processed datasets are stored.
 * **config/**: Contains tickers.json which tracks available models.
 * **logs/**: Check here if anything goes wrong.
+* **project_report.pdf**: Whitepaper describing technical details of the project.
+* **other/**: Contains other files used for the creation of the report and project, but that are not part of the application.
 
 
 
