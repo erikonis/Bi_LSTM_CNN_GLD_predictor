@@ -140,7 +140,7 @@ The application features a modern graphical interface that serves as the command
 - **System Stability**: Built-in safety measures for graceful shutdowns and process management.
 
 ## 2. Advanced Deep Learning Models
-The system doesn't just look at past prices; it understands complex patterns through a hybrid architecture:
+The system understands complex patterns through a hybrid architecture:
 - **Temporal Analysis**: Using **Bi-LSTM** (Bidirectional Long Short-Term Memory) to process price sequences in both forward and backward time directions, capturing context that standard models miss.
 - **Spatial Feature Extraction**: **1D-CNN** layers treat time-series data like "images" to automatically identify local patterns and trends.
 - **Self-Attention**: An integrated attention mechanism that allows the model to "focus" on specific critical dates or events within a 30-day window.
@@ -150,7 +150,7 @@ Unlike basic predictors, this tool combines two distinct data streams:
 - **Market Dynamics**: Real-time OHLC (Open, High, Low, Close) price data.
 - **Sentiment Vectors**: Numerical representations of market sentiment, fused early in the model's architecture to influence price forecasts based on market "mood."
 
-## 4. Professional Financial Backtester
+## 4. Financial Backtester
 The app includes a simulation environment to test how a model would have performed in real trading:
 - **Strategy Simulation**: Executes Long/Short signals based on model-predicted price movements.
 - **Transaction Costs**: Accurately accounts for trading fees and slippage to ensure realistic results.
